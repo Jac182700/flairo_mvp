@@ -1,4 +1,4 @@
--- FLAIRO Rewards and provider-settlement schema for Supabase Postgres.
+-- FLAIRO Plume Points and provider-settlement schema for Supabase Postgres.
 -- Apply in a Supabase migration after Auth is enabled. All exposed tables use RLS.
 
 create extension if not exists pgcrypto;
@@ -59,9 +59,11 @@ exception when duplicate_object then null;
 end $$;
 
 do $$ begin
-  create type public.booking_status as enum ('requested', 'scheduled', 'completed', 'cancelled', 'refunded', 'disputed');
+  create type public.booking_status as enum ('requested', 'claimed', 'scheduled', 'completed', 'cancelled', 'refunded', 'disputed');
 exception when duplicate_object then null;
 end $$;
+
+alter type public.booking_status add value if not exists 'claimed' after 'requested';
 
 do $$ begin
   create type public.settlement_status as enum ('not_started', 'unpaid', 'offset_applied', 'paid', 'disputed', 'written_off');
@@ -182,6 +184,8 @@ create table if not exists public.provider_agreements (
   id uuid primary key default gen_random_uuid(),
   provider_id uuid not null references public.providers(id) on delete cascade,
   referral_fee_percent numeric(6,3) not null default 10 check (referral_fee_percent >= 0 and referral_fee_percent <= 100),
+  preferred_vendor boolean not null default false,
+  preferred_referral_fee_percent numeric(6,3) not null default 10 check (preferred_referral_fee_percent >= 0 and preferred_referral_fee_percent <= 100),
   plus_pricing_confirmed boolean not null default false,
   lowest_price_claim_approved boolean not null default false,
   effective_at timestamptz not null default now(),
@@ -220,7 +224,7 @@ create table if not exists public.reward_program_settings (
   redemption_cap_percent_of_subtotal numeric(6,3) not null default 10 check (redemption_cap_percent_of_subtotal >= 0 and redemption_cap_percent_of_subtotal <= 100),
   availability_waiting_days integer not null default 0 check (availability_waiting_days between 0 and 30),
   expiration_months_without_activity integer not null default 18 check (expiration_months_without_activity > 0),
-  expiration_reminder_days integer[] not null default array[60, 30],
+  expiration_reminder_days integer[] not null default array[7],
   updated_by uuid references public.admin_users(id),
   updated_at timestamptz not null default now()
 );
@@ -292,6 +296,12 @@ create table if not exists public.service_bookings (
   provider_retained_after_referral_cents integer not null check (provider_retained_after_referral_cents >= 0),
   completion_confirmed_at timestamptz,
   payment_confirmed_at timestamptz,
+  job_board_status text not null default 'preferred_preview',
+  preferred_visibility_ends_at timestamptz,
+  provider_claimed_at timestamptz,
+  schedule_due_at timestamptz,
+  schedule_confirmed_at timestamptz,
+  schedule_timer_reset_count integer not null default 0 check (schedule_timer_reset_count >= 0),
   duplicate_review boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -432,6 +442,48 @@ create table if not exists public.reward_notifications (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.customer_experience_surveys (
+  id uuid primary key default gen_random_uuid(),
+  booking_id uuid not null unique references public.service_bookings(id) on delete cascade,
+  resident_id uuid not null references public.resident_profiles(id) on delete cascade,
+  provider_id uuid not null references public.providers(id) on delete cascade,
+  service_id uuid not null references public.services(id) on delete restrict,
+  resident_email text not null,
+  completion_date timestamptz not null,
+  status text not null default 'pending' check (status in ('pending', 'completed')),
+  in_app_status text not null default 'pending' check (in_app_status in ('pending', 'sent', 'completed')),
+  email_status text not null default 'sent' check (email_status in ('pending', 'sent', 'completed')),
+  email_sent_at timestamptz not null default now(),
+  submitted_at timestamptz,
+  submitted_via text check (submitted_via in ('in_app', 'email')),
+  overall_rating integer check (overall_rating between 1 and 5),
+  overall_rating_label text,
+  vendor_confidence text check (vendor_confidence in ('absolutely', 'maybe', 'no')),
+  flagged boolean generated always as (
+    coalesce(overall_rating <= 2, false) or vendor_confidence = 'no'
+  ) stored,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (
+    status = 'pending'
+    or (overall_rating is not null and vendor_confidence is not null and submitted_at is not null)
+  )
+);
+
+create table if not exists public.customer_experience_email_jobs (
+  id uuid primary key default gen_random_uuid(),
+  survey_id uuid not null unique references public.customer_experience_surveys(id) on delete cascade,
+  booking_id uuid not null references public.service_bookings(id) on delete cascade,
+  resident_id uuid not null references public.resident_profiles(id) on delete cascade,
+  provider_id uuid not null references public.providers(id) on delete cascade,
+  recipient_email text not null,
+  status text not null default 'queued' check (status in ('queued', 'sent', 'completed', 'failed')),
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  sent_at timestamptz,
+  completed_at timestamptz
+);
+
 create table if not exists public.risk_flags (
   id uuid primary key default gen_random_uuid(),
   resident_id uuid references public.resident_profiles(id) on delete cascade,
@@ -463,6 +515,94 @@ create table if not exists public.audit_logs (
 );
 
 create schema if not exists private;
+
+alter table public.provider_agreements
+  add column if not exists preferred_vendor boolean not null default false,
+  add column if not exists preferred_referral_fee_percent numeric(6,3) not null default 10 check (preferred_referral_fee_percent >= 0 and preferred_referral_fee_percent <= 100);
+
+alter table public.service_bookings
+  add column if not exists job_board_status text not null default 'preferred_preview',
+  add column if not exists preferred_visibility_ends_at timestamptz,
+  add column if not exists provider_claimed_at timestamptz,
+  add column if not exists schedule_due_at timestamptz,
+  add column if not exists schedule_confirmed_at timestamptz,
+  add column if not exists schedule_timer_reset_count integer not null default 0 check (schedule_timer_reset_count >= 0);
+
+create or replace function public.enqueue_customer_experience_survey()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  created_survey_id uuid;
+begin
+  if new.status = 'completed' and old.status is distinct from new.status then
+    insert into public.customer_experience_surveys (
+      booking_id,
+      resident_id,
+      provider_id,
+      service_id,
+      resident_email,
+      completion_date,
+      in_app_status,
+      email_status,
+      email_sent_at
+    )
+    select
+      new.id,
+      new.resident_id,
+      new.provider_id,
+      new.service_id,
+      resident.email,
+      coalesce(new.completion_confirmed_at, now()),
+      'pending',
+      'sent',
+      now()
+    from public.resident_profiles resident
+    where resident.id = new.resident_id
+    on conflict (booking_id) do nothing
+    returning id into created_survey_id;
+
+    if created_survey_id is not null then
+      insert into public.customer_experience_email_jobs (
+        survey_id,
+        booking_id,
+        resident_id,
+        provider_id,
+        recipient_email,
+        status,
+        payload,
+        sent_at
+      )
+      select
+        created_survey_id,
+        new.id,
+        new.resident_id,
+        new.provider_id,
+        resident.email,
+        'sent',
+        jsonb_build_object(
+          'subject', 'How was your Flairo experience?',
+          'questions', jsonb_build_array('overall_experience', 'vendor_confidence')
+        ),
+        now()
+      from public.resident_profiles resident
+      where resident.id = new.resident_id;
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+revoke all on function public.enqueue_customer_experience_survey() from public;
+grant execute on function public.enqueue_customer_experience_survey() to authenticated;
+
+drop trigger if exists trg_enqueue_customer_experience_survey on public.service_bookings;
+create trigger trg_enqueue_customer_experience_survey
+after update of status on public.service_bookings
+for each row
+execute function public.enqueue_customer_experience_survey();
 
 create or replace function private.current_user_is_admin()
 returns boolean
@@ -526,12 +666,17 @@ create index if not exists idx_reward_transactions_account_status on public.rewa
 create index if not exists idx_reward_transactions_booking on public.reward_transactions(booking_id);
 create index if not exists idx_reward_transactions_expiration on public.reward_transactions(status, expires_at);
 create index if not exists idx_provider_fee_transactions_provider on public.provider_fee_transactions(provider_id, status, created_at desc);
+create index if not exists idx_customer_experience_surveys_booking on public.customer_experience_surveys(booking_id);
+create index if not exists idx_customer_experience_surveys_provider on public.customer_experience_surveys(provider_id, status, created_at desc);
+create index if not exists idx_customer_experience_surveys_resident on public.customer_experience_surveys(resident_id, status, created_at desc);
+create index if not exists idx_customer_experience_surveys_flags on public.customer_experience_surveys(flagged, status, submitted_at desc);
+create index if not exists idx_customer_experience_email_jobs_status on public.customer_experience_email_jobs(status, created_at desc);
 create index if not exists idx_risk_flags_status on public.risk_flags(status, severity, created_at desc);
 create index if not exists idx_audit_logs_record on public.audit_logs(table_name, record_id, created_at desc);
 
 insert into public.membership_plans (level, label, monthly_fee_cents, base_points_per_dollar, redemption_threshold_points, benefits)
 values
-  ('free', 'FLAIRO Rewards', 0, 1, 500, '{"pricing":"standard marketplace pricing"}'),
+  ('free', 'FLAIRO Resident', 0, 0, 0, '{"pricing":"standard marketplace pricing","plume_points":"not eligible without FLAIRO PLUS"}'),
   ('plus', 'FLAIRO PLUS', 500, 2, 250, '{"pricing":"member pricing","promotions":"advance access"}')
 on conflict (level) do update set
   label = excluded.label,
@@ -542,7 +687,7 @@ on conflict (level) do update set
   updated_at = now();
 
 insert into public.reward_program_settings (id, point_value_cents, referral_fee_percent, redemption_cap_percent_of_subtotal, availability_waiting_days, expiration_months_without_activity, expiration_reminder_days)
-values (true, 1, 10, 10, 0, 18, array[60, 30])
+values (true, 1, 10, 10, 0, 18, array[7])
 on conflict (id) do update set
   point_value_cents = excluded.point_value_cents,
   referral_fee_percent = excluded.referral_fee_percent,
@@ -554,17 +699,17 @@ on conflict (id) do update set
 
 insert into public.reward_service_rules (service_code, free_completion_bonus_points, plus_completion_bonus_points, recurring_eligible)
 values
-  ('recurring_housekeeping', 100, 200, true),
-  ('groomer_appointment', 25, 50, false),
-  ('dog_walking', 10, 20, true),
-  ('pet_sitter_drop_in', 10, 20, true),
-  ('move_out_cleaning', 100, 200, false),
-  ('moving_service', 150, 300, false),
-  ('move_out_touch_up_painting', 100, 200, false),
-  ('move_out_full_painting', 200, 400, false),
-  ('move_out_deep_cleaning', 125, 250, false),
-  ('handyman_work', 50, 100, false),
-  ('junk_hauling', 75, 150, false)
+  ('recurring_housekeeping', 0, 200, true),
+  ('groomer_appointment', 0, 50, false),
+  ('dog_walking', 0, 20, true),
+  ('pet_sitter_drop_in', 0, 20, true),
+  ('move_out_cleaning', 0, 200, false),
+  ('moving_service', 0, 300, false),
+  ('move_out_touch_up_painting', 0, 200, false),
+  ('move_out_full_painting', 0, 400, false),
+  ('move_out_deep_cleaning', 0, 250, false),
+  ('handyman_work', 0, 100, false),
+  ('junk_hauling', 0, 150, false)
 on conflict (service_code) do update set
   free_completion_bonus_points = excluded.free_completion_bonus_points,
   plus_completion_bonus_points = excluded.plus_completion_bonus_points,
@@ -573,9 +718,9 @@ on conflict (service_code) do update set
 
 insert into public.reward_recurring_milestones (completed_appointments, free_bonus_points, plus_bonus_points)
 values
-  (3, 100, 200),
-  (6, 250, 500),
-  (12, 500, 1000)
+  (3, 0, 200),
+  (6, 0, 500),
+  (12, 0, 1000)
 on conflict (completed_appointments) do update set
   free_bonus_points = excluded.free_bonus_points,
   plus_bonus_points = excluded.plus_bonus_points,
@@ -609,6 +754,8 @@ alter table public.admin_adjustments enable row level security;
 alter table public.point_expiration_batches enable row level security;
 alter table public.point_expiration_batch_items enable row level security;
 alter table public.reward_notifications enable row level security;
+alter table public.customer_experience_surveys enable row level security;
+alter table public.customer_experience_email_jobs enable row level security;
 alter table public.risk_flags enable row level security;
 alter table public.audit_logs enable row level security;
 
@@ -617,6 +764,8 @@ grant select on public.communities, public.membership_plans, public.services, pu
 grant select, insert, update on public.resident_profiles, public.units, public.resident_memberships, public.service_bookings to authenticated;
 grant select on public.reward_accounts, public.reward_transactions, public.reward_redemptions, public.reward_notifications to authenticated;
 grant select, insert, update on public.service_completion_verifications, public.refunds_disputes to authenticated;
+grant select, update on public.customer_experience_surveys to authenticated;
+grant select on public.customer_experience_email_jobs to authenticated;
 grant select on public.providers, public.provider_agreements, public.provider_pricing, public.provider_fee_transactions, public.provider_settlements, public.provider_settlement_items to authenticated;
 grant select, insert, update, delete on
   public.communities,
@@ -641,6 +790,8 @@ grant select, insert, update, delete on
   public.point_expiration_batches,
   public.point_expiration_batch_items,
   public.reward_notifications,
+  public.customer_experience_surveys,
+  public.customer_experience_email_jobs,
   public.risk_flags,
   public.audit_logs
 to authenticated;
@@ -970,6 +1121,38 @@ create policy "notifications owner read"
 on public.reward_notifications for select to authenticated
 using (private.current_user_is_admin() or resident_id = private.current_user_resident_id());
 
+drop policy if exists "surveys visible by role" on public.customer_experience_surveys;
+create policy "surveys visible by role"
+on public.customer_experience_surveys for select to authenticated
+using (
+  private.current_user_is_admin()
+  or resident_id = private.current_user_resident_id()
+  or provider_id = private.current_user_provider_id()
+);
+
+drop policy if exists "resident can submit own survey" on public.customer_experience_surveys;
+create policy "resident can submit own survey"
+on public.customer_experience_surveys for update to authenticated
+using (resident_id = private.current_user_resident_id() and status = 'pending')
+with check (
+  resident_id = private.current_user_resident_id()
+  and status in ('pending', 'completed')
+  and in_app_status in ('pending', 'completed')
+  and email_status in ('sent', 'completed')
+);
+
+drop policy if exists "admin manage customer experience surveys" on public.customer_experience_surveys;
+create policy "admin manage customer experience surveys"
+on public.customer_experience_surveys for all to authenticated
+using (private.current_user_is_admin())
+with check (private.current_user_is_admin());
+
+drop policy if exists "customer experience email jobs admin only" on public.customer_experience_email_jobs;
+create policy "customer experience email jobs admin only"
+on public.customer_experience_email_jobs for all to authenticated
+using (private.current_user_is_admin())
+with check (private.current_user_is_admin());
+
 drop policy if exists "risk flags visible by role" on public.risk_flags;
 create policy "risk flags visible by role"
 on public.risk_flags for select to authenticated
@@ -1029,6 +1212,40 @@ select
 from public.providers provider
 left join public.service_bookings booking on booking.provider_id = provider.id
 group by provider.id, provider.business_name;
+
+create or replace view public.v_provider_customer_experience_summary
+with (security_invoker = true)
+as
+select
+  provider.id as provider_id,
+  provider.business_name,
+  coalesce(round(avg(survey.overall_rating)::numeric, 2), 0) as average_experience_rating,
+  coalesce(count(survey.id) filter (where survey.status = 'completed'), 0) as completed_responses,
+  coalesce(count(survey.id) filter (where survey.status = 'pending'), 0) as pending_surveys,
+  coalesce(count(survey.id) filter (where survey.flagged), 0) as flagged_responses,
+  coalesce(count(survey.id) filter (where survey.vendor_confidence = 'absolutely'), 0) as confident_repeat_responses
+from public.providers provider
+left join public.customer_experience_surveys survey on survey.provider_id = provider.id
+group by provider.id, provider.business_name;
+
+create or replace view public.v_provider_job_board_priority
+with (security_invoker = true)
+as
+select
+  provider.id as provider_id,
+  provider.business_name,
+  coalesce(agreement.preferred_vendor, false) as preferred_vendor,
+  coalesce(agreement.referral_fee_percent, 10) as referral_fee_percent,
+  coalesce(agreement.preferred_referral_fee_percent, agreement.referral_fee_percent, 10) as preferred_referral_fee_percent,
+  coalesce(experience.average_experience_rating, 0) as average_experience_rating,
+  (case when coalesce(agreement.preferred_vendor, false) then 100 else 0 end)
+    + coalesce(experience.average_experience_rating, 0) as board_priority_score
+from public.providers provider
+left join public.provider_agreements agreement
+  on agreement.provider_id = provider.id
+  and agreement.active
+left join public.v_provider_customer_experience_summary experience
+  on experience.provider_id = provider.id;
 
 create or replace view public.v_rewards_dashboard
 with (security_invoker = true)

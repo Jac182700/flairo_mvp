@@ -144,13 +144,13 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
   redemptionMaxPercentOfEligibleSubtotal: 10,
   availabilityWaitingDays: 0,
   expirationMonthsWithoutActivity: 18,
-  expirationReminderDays: [60, 30],
+  expirationReminderDays: [7],
   free: {
     level: 'free',
-    label: 'FLAIRO Rewards',
+    label: 'FLAIRO Resident',
     monthlyFeeCents: 0,
-    basePointsPerDollar: 1,
-    redemptionThresholdPoints: 500,
+    basePointsPerDollar: 0,
+    redemptionThresholdPoints: 0,
   },
   plus: {
     level: 'plus',
@@ -164,7 +164,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'recurring_housekeeping',
       label: 'Recurring housekeeping visit',
       category: 'Home Care',
-      freeCompletionBonus: 100,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 200,
       recurringEligible: true,
       active: true,
@@ -173,7 +173,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'groomer_appointment',
       label: 'Groomer appointment',
       category: 'Pet Care',
-      freeCompletionBonus: 25,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 50,
       recurringEligible: false,
       active: true,
@@ -182,7 +182,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'dog_walking',
       label: 'Dog-walking appointment',
       category: 'Pet Care',
-      freeCompletionBonus: 10,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 20,
       recurringEligible: true,
       active: true,
@@ -191,7 +191,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'pet_sitter_drop_in',
       label: 'Pet-sitter drop-in',
       category: 'Pet Care',
-      freeCompletionBonus: 10,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 20,
       recurringEligible: true,
       active: true,
@@ -200,7 +200,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'move_out_cleaning',
       label: 'Move-out cleaning',
       category: 'Move-out',
-      freeCompletionBonus: 100,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 200,
       recurringEligible: false,
       active: true,
@@ -209,7 +209,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'moving_service',
       label: 'Moving service',
       category: 'Moving',
-      freeCompletionBonus: 150,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 300,
       recurringEligible: false,
       active: true,
@@ -218,7 +218,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'move_out_touch_up_painting',
       label: 'Move-out touch-up painting',
       category: 'Move-out',
-      freeCompletionBonus: 100,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 200,
       recurringEligible: false,
       active: true,
@@ -227,7 +227,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'move_out_full_painting',
       label: 'Move-out full painting',
       category: 'Move-out',
-      freeCompletionBonus: 200,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 400,
       recurringEligible: false,
       active: true,
@@ -236,7 +236,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'move_out_deep_cleaning',
       label: 'Move-out deep cleaning',
       category: 'Move-out',
-      freeCompletionBonus: 125,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 250,
       recurringEligible: false,
       active: true,
@@ -245,7 +245,7 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'handyman_work',
       label: 'Handyman work',
       category: 'Home Care',
-      freeCompletionBonus: 50,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 100,
       recurringEligible: false,
       active: true,
@@ -254,16 +254,16 @@ export const defaultRewardProgramConfig: RewardProgramConfig = {
       code: 'junk_hauling',
       label: 'Junk-hauling service',
       category: 'Home Care',
-      freeCompletionBonus: 75,
+      freeCompletionBonus: 0,
       plusCompletionBonus: 150,
       recurringEligible: false,
       active: true,
     },
   ],
   recurringMilestones: [
-    { completedAppointments: 3, freeBonus: 100, plusBonus: 200 },
-    { completedAppointments: 6, freeBonus: 250, plusBonus: 500 },
-    { completedAppointments: 12, freeBonus: 500, plusBonus: 1000 },
+    { completedAppointments: 3, freeBonus: 0, plusBonus: 200 },
+    { completedAppointments: 6, freeBonus: 0, plusBonus: 500 },
+    { completedAppointments: 12, freeBonus: 0, plusBonus: 1000 },
   ],
 };
 
@@ -346,12 +346,19 @@ export function calculateEarnedPoints({
 }): EarnedPointBreakdown {
   const safeConfig = clampConfig(config);
   const rule = serviceRule(serviceCode, safeConfig);
+  if (membershipLevel !== 'plus') {
+    return {
+      basePoints: 0,
+      completionBonusPoints: 0,
+      plusAdditionalPoints: 0,
+      recurringBonusPoints: 0,
+      totalPoints: 0,
+    };
+  }
   const memberRule = membershipRule(membershipLevel, safeConfig);
   const subtotalDollars = Math.floor(Math.max(eligibleSubtotalCents, 0) / 100);
   const basePoints = Math.floor(subtotalDollars * memberRule.basePointsPerDollar * promotionMultiplier);
-  const completionBonusPoints = membershipLevel === 'plus'
-    ? rule.plusCompletionBonus
-    : rule.freeCompletionBonus;
+  const completionBonusPoints = rule.plusCompletionBonus;
   const recurringBonusPoints = calculateRecurringMilestoneBonus({
     completedRecurringCountIncludingThis,
     config: safeConfig,
@@ -359,14 +366,6 @@ export function calculateEarnedPoints({
     serviceCode,
   });
 
-  const freeBase = Math.floor(subtotalDollars * safeConfig.free.basePointsPerDollar * promotionMultiplier);
-  const freeBonus = rule.freeCompletionBonus;
-  const freeRecurring = calculateRecurringMilestoneBonus({
-    completedRecurringCountIncludingThis,
-    config: safeConfig,
-    membershipLevel: 'free',
-    serviceCode,
-  });
   const totalPoints = basePoints + completionBonusPoints + recurringBonusPoints;
 
   return {
@@ -374,9 +373,7 @@ export function calculateEarnedPoints({
     completionBonusPoints,
     recurringBonusPoints,
     totalPoints,
-    plusAdditionalPoints: membershipLevel === 'plus'
-      ? Math.max(totalPoints - freeBase - freeBonus - freeRecurring, 0)
-      : 0,
+    plusAdditionalPoints: totalPoints,
   };
 }
 
@@ -392,12 +389,13 @@ export function calculateRecurringMilestoneBonus({
   serviceCode: EligibleServiceCode;
 }): number {
   const rule = serviceRule(serviceCode, config);
+  if (membershipLevel !== 'plus') return 0;
   if (!rule.recurringEligible) return 0;
   const milestone = config.recurringMilestones.find(
     (item) => item.completedAppointments === completedRecurringCountIncludingThis,
   );
   if (!milestone) return 0;
-  return membershipLevel === 'plus' ? milestone.plusBonus : milestone.freeBonus;
+  return milestone.plusBonus;
 }
 
 export function recurringProgress({
@@ -449,7 +447,7 @@ export function calculateCheckoutQuote({
     eligibleSubtotalCents * (safeConfig.redemptionMaxPercentOfEligibleSubtotal / 100),
   );
   const maxPointsByCap = creditCentsToPoints(maxCreditByPercentCents, safeConfig);
-  const thresholdEligiblePoints = availablePoints >= memberRule.redemptionThresholdPoints
+  const thresholdEligiblePoints = membershipLevel === 'plus' && availablePoints >= memberRule.redemptionThresholdPoints
     ? Math.max(availablePoints, 0)
     : 0;
   const maxRedeemablePoints = Math.min(thresholdEligiblePoints, maxPointsByCap);
@@ -667,7 +665,7 @@ export function createExpirationEntries({
       direction: 'debit' as const,
       status: 'expired' as const,
       points: entry.points,
-      reason: 'Points expired after configured inactivity period',
+      reason: 'Plume Points expired after configured inactivity period',
       source: 'expiration_batch',
       createdAt,
       relatedLedgerEntryId: entry.id,
@@ -772,7 +770,7 @@ export function rewardRiskFlags({
     flags.push({
       code: 'ineligible_service',
       severity: 'block',
-      message: 'Points cannot be earned or redeemed on an ineligible service.',
+      message: 'Plume Points cannot be earned or redeemed on an ineligible service.',
     });
   }
 

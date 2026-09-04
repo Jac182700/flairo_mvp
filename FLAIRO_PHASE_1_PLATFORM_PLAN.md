@@ -39,7 +39,7 @@ Vendor agreements should include standard fee %, PLUS fee %, optional flat booki
 
 ## 9. Rewards And Points Logic
 
-Track points issued, redeemed, current balance, transaction reason, booking association, redemption association, discount value, expiration, and admin-configured rules such as points per dollar, promotions, referrals, membership bonuses, thresholds, caps, eligible services, and excluded services. The app now uses a ledger model with pending, available, redeemed, reversed, and expired statuses instead of mutating a single balance.
+Track Plume Points issued, redeemed, current balance, transaction reason, booking association, redemption association, discount value, expiration, and admin-configured rules such as points per dollar, promotions, referrals, membership bonuses, thresholds, caps, eligible services, and excluded services. The app now uses a ledger model with pending, available, redeemed, reversed, and expired statuses instead of mutating a single balance. Current local rules make Plume Points a FLAIRO PLUS benefit.
 
 ## 10. Vendor Settlement Ledger
 
@@ -47,7 +47,7 @@ Every booking creates a settlement ledger entry with vendor, booking, service am
 
 ## 11. Admin Portal Navigation
 
-Primary admin sections: Dashboard, Communities, Services, Pricing, Vendors, Bookings, Rewards, Settlements, Reports, Audit.
+Primary admin sections: Dashboard, Communities, Services, Pricing, Vendors, Bookings, Plume Points, Provider, Customer Experience, Reports, Audit.
 
 ## 12. Service Management Screen
 
@@ -73,7 +73,7 @@ Report booking performance, membership conversion/savings, vendor performance, r
 
 Core tables: communities, units, residents, memberships, services, service_pricing_tiers, vendors, vendor_agreements, bookings, payment_intents, reward_accounts, reward_transactions, settlement_ledger_entries, admin_users, audit_events, files.
 
-Implemented schema blueprint: `supabase/flairo_rewards_schema.sql` defines rewards, PLUS memberships, provider pricing, booking snapshots, completion verification, reward redemptions, provider fee transactions, settlements, refunds/disputes, admin adjustments, expiration batches, reminder notifications, risk flags, dashboard views, and Supabase RLS policies.
+Implemented schema blueprint: `supabase/flairo_rewards_schema.sql` defines Plume Points, PLUS memberships, provider pricing, booking snapshots, completion verification, reward redemptions, provider fee transactions, settlements, refunds/disputes, admin adjustments, expiration batches, reminder notifications, customer experience surveys, risk flags, dashboard views, and Supabase RLS policies.
 
 ## 18. Business Decisions Required
 
@@ -94,13 +94,13 @@ Implemented schema blueprint: `supabase/flairo_rewards_schema.sql` defines rewar
 - Occupied Cleaning/Recurring Housekeeping service pricing from stored unit configuration.
 - Standard and PLUS resident prices with savings display.
 - PLUS eligibility status check.
-- Reward discount toggle with configurable redemption cap, threshold, and provider referral-fee offset.
-- Free and PLUS earning rules with service-completion bonuses and recurring-service milestone bonuses.
+- Plume Point credit toggle with configurable redemption cap, threshold, and provider referral-fee offset.
+- PLUS earning rules with service-completion bonuses and recurring-service milestone bonuses.
 - Pending points that become available after provider completion/payment confirmation.
 - Refund/dispute reversal flow that can produce a negative reward balance.
-- Point-expiration batch action and 60/30 day reminder detection.
+- Point-expiration batch action and configurable reminder detection.
 - Booking price snapshot.
 - Booking snapshot preserves original eligible subtotal, selected price, resident credit, provider payment, gross 10% referral fee, credit offset, net amount owed to FLAIRO, and provider retained amount.
 - Provider settlement ledger calculation and provider portal summary.
-- Admin dashboard with services, pricing, bookings, vendors, reward controls, provider settlement, reports, and audit trail.
-- Rewards workflow self-test in `src/rewardsSystem.selftest.ts`.
+- Admin dashboard with services, pricing, bookings, vendors, Plume Point controls, provider settlement, customer experience, reports, and audit trail.
+- Plume Points workflow self-test in `src/rewardsSystem.selftest.ts`.

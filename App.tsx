@@ -1,7 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
+  Easing,
   Image,
   ImageSourcePropType,
+  Modal,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -41,15 +44,33 @@ import {
   type RewardProgramConfig,
   type RewardRiskFlag,
 } from './src/rewardsSystem';
-import { hasSupabaseConfig } from './lib/supabase';
+import {
+  claimFlairoAppUser,
+  checkFlairoSupabaseConnection,
+  getCurrentFlairoAppUser,
+  hasSupabaseConfig,
+  isFlairoAdminRole,
+  isResidentOrVendorRole,
+  supabase,
+  type FlairoAppUser,
+  type FlairoConnectionHealth,
+} from './lib/supabase';
 
 type Screen = 'home' | 'register' | 'services' | 'rewards' | 'bookings' | 'admin' | 'profile';
+type AccessIntent = 'resident' | 'vendor' | 'admin';
+type AuthUser = { id: string; email?: string | null };
 type Category = 'Home Care' | 'Move-out' | 'Moving' | 'Pet Care' | 'Perks';
 type Filter = Category | 'All';
 type MembershipStatus = 'Active' | 'Trial' | 'Past Due' | 'Cancelled' | 'Expired' | 'None';
 type VerificationStatus = 'Unverified' | 'Resident Self-Verified' | 'Property Verified' | 'Admin Verified';
 type DiscountTreatment = 'FLAIRO absorbs discount' | 'Vendor absorbs discount' | 'Shared discount' | 'Discount offsets FLAIRO commission' | 'Promotional subsidy';
-type AdminTab = 'Dashboard' | 'Services' | 'Pricing' | 'Vendors' | 'Bookings' | 'Rewards' | 'Provider' | 'Reports' | 'Audit';
+type AdminTab = 'Dashboard' | 'Services' | 'Pricing' | 'Vendors' | 'Bookings' | 'Plume Points' | 'Provider' | 'Experience' | 'Reports' | 'Audit';
+type BookingStatus = 'Requested' | 'Claimed' | 'Scheduled' | 'Completed' | 'Refunded';
+type JobBoardStatus = 'Preferred preview' | 'Available to vendor board' | 'Claimed' | 'Scheduled' | 'Completed' | 'Released';
+type StarRating = 1 | 2 | 3 | 4 | 5;
+type VendorConfidence = 'Absolutely — I’d happily use them again' | 'Maybe — it would depend on the situation' | 'No — I’d prefer someone different next time';
+type SurveyDeliveryStatus = 'Pending' | 'Sent' | 'Completed';
+type SurveyChannel = 'In-app' | 'Email';
 
 type Community = {
   id: string;
@@ -100,6 +121,12 @@ type VendorAgreement = {
   paymentConnectionStatus: string;
   standardFlairoFeePercent: number;
   plusFlairoFeePercent: number;
+  preferred: boolean;
+  preferredFlairoFeePercent: number;
+  customerExperienceRating: number;
+  serviceEligibility: EligibleServiceCode[];
+  serviceCities: string[];
+  serviceZipCodes: string[];
   flatBookingFee: number;
   discountTreatment: DiscountTreatment;
   active: boolean;
@@ -125,11 +152,13 @@ type Service = {
 type Booking = {
   id: string;
   residentName: string;
+  residentEmail: string;
   communityName: string;
   unitNumber: string;
   unitConfig: string;
   serviceId: string;
   serviceTitle: string;
+  vendorAgreementId: string;
   vendorName: string;
   bookingDate: string;
   serviceDate: string;
@@ -158,8 +187,49 @@ type Booking = {
   settlementStatus: 'Not started' | 'Unpaid' | 'Paid' | 'Disputed' | 'Offset applied';
   reviewFlags: RewardRiskFlag[];
   paymentStatus: string;
-  bookingStatus: string;
+  bookingStatus: BookingStatus;
+  jobBoardStatus: JobBoardStatus;
+  providerPreferred: boolean;
+  providerPreferredFeePercent: number;
+  providerExperienceScoreAtBooking: number;
+  preferredAccessEndsAt?: string;
+  vendorClaimedAt?: string;
+  scheduleDueAt?: string;
+  scheduledAt?: string;
+  scheduleTimerResets: number;
   discountTreatment: DiscountTreatment;
+};
+
+type CustomerExperienceSurvey = {
+  id: string;
+  bookingId: string;
+  residentName: string;
+  residentEmail: string;
+  serviceId: string;
+  serviceTitle: string;
+  vendorAgreementId: string;
+  vendorName: string;
+  completionDate: string;
+  emailSentAt: string;
+  submittedAt?: string;
+  status: 'Pending' | 'Completed';
+  inAppStatus: SurveyDeliveryStatus;
+  emailStatus: SurveyDeliveryStatus;
+  rating?: StarRating;
+  ratingLabel?: string;
+  vendorConfidence?: VendorConfidence;
+  submittedBy?: SurveyChannel;
+  flagged: boolean;
+};
+
+type ProviderExperienceStat = {
+  vendorName: string;
+  averageRating: number;
+  completedResponses: number;
+  flaggedResponses: number;
+  confidentResponses: number;
+  preferred: boolean;
+  boardPriority: number;
 };
 
 const fullLogo = require('./assets/flairo-gold-full-logo-web.jpg') as ImageSourcePropType;
@@ -178,7 +248,7 @@ const communities: Community[] = [
     active: true,
     plusAvailable: true,
     unitFormat: 'Building optional + unit, e.g. 4B',
-    promotion: 'Launch residents earn 2x points on first Home Care booking.',
+    promotion: 'FLAIRO Plus residents earn Plume Points on eligible services.',
   },
   {
     id: 'solara',
@@ -224,6 +294,12 @@ const vendorAgreements: VendorAgreement[] = [
     paymentConnectionStatus: 'Connected account ready',
     standardFlairoFeePercent: 10,
     plusFlairoFeePercent: 10,
+    preferred: true,
+    preferredFlairoFeePercent: 12,
+    customerExperienceRating: 4.8,
+    serviceEligibility: ['recurring_housekeeping', 'move_out_cleaning', 'move_out_deep_cleaning'],
+    serviceCities: ['Fort Lauderdale', 'Miami'],
+    serviceZipCodes: ['33304', '33137'],
     flatBookingFee: 0,
     discountTreatment: 'Discount offsets FLAIRO commission',
     active: true,
@@ -236,6 +312,12 @@ const vendorAgreements: VendorAgreement[] = [
     paymentConnectionStatus: 'Vendor onboarding pending',
     standardFlairoFeePercent: 10,
     plusFlairoFeePercent: 10,
+    preferred: false,
+    preferredFlairoFeePercent: 10,
+    customerExperienceRating: 4.5,
+    serviceEligibility: ['moving_service'],
+    serviceCities: ['Miami', 'Sunrise'],
+    serviceZipCodes: ['33137', '33323'],
     flatBookingFee: 0,
     discountTreatment: 'Shared discount',
     active: true,
@@ -248,6 +330,12 @@ const vendorAgreements: VendorAgreement[] = [
     paymentConnectionStatus: 'Connected account ready',
     standardFlairoFeePercent: 10,
     plusFlairoFeePercent: 10,
+    preferred: true,
+    preferredFlairoFeePercent: 13,
+    customerExperienceRating: 4.7,
+    serviceEligibility: ['groomer_appointment', 'dog_walking', 'pet_sitter_drop_in'],
+    serviceCities: ['Fort Lauderdale'],
+    serviceZipCodes: ['33304'],
     flatBookingFee: 0,
     discountTreatment: 'Vendor absorbs discount',
     active: true,
@@ -260,6 +348,12 @@ const vendorAgreements: VendorAgreement[] = [
     paymentConnectionStatus: 'Connected account ready',
     standardFlairoFeePercent: 10,
     plusFlairoFeePercent: 10,
+    preferred: false,
+    preferredFlairoFeePercent: 10,
+    customerExperienceRating: 4.6,
+    serviceEligibility: ['handyman_work', 'junk_hauling', 'move_out_touch_up_painting', 'move_out_full_painting'],
+    serviceCities: ['Miami', 'Fort Lauderdale'],
+    serviceZipCodes: ['33137', '33304'],
     flatBookingFee: 0,
     discountTreatment: 'Shared discount',
     active: true,
@@ -341,7 +435,7 @@ const services: Service[] = [
     category: 'Move-out',
     duration: '4-7 hrs',
     accent: '#D4AF37',
-    detail: 'Eligible subtotal, reward credits, and referral fee are preserved separately at checkout.',
+    detail: 'Eligible subtotal, Plume Point credits, and referral fee are preserved separately at checkout.',
     vendorAgreementId: 'sparkle-agreement',
     standardPrice: 245,
     plusPrice: 215,
@@ -393,7 +487,7 @@ const services: Service[] = [
     category: 'Home Care',
     duration: '90 min',
     accent: '#D4AF37',
-    detail: 'Shared-discount service with completion verification before points become available.',
+    detail: 'Shared-discount service with completion verification before Plume Points become available.',
     vendorAgreementId: 'homefix-agreement',
     standardPrice: 125,
     plusPrice: 110,
@@ -414,7 +508,7 @@ const services: Service[] = [
 ];
 
 const filters: Filter[] = ['All', 'Home Care', 'Move-out', 'Moving', 'Pet Care', 'Perks'];
-const adminTabs: AdminTab[] = ['Dashboard', 'Services', 'Pricing', 'Vendors', 'Bookings', 'Rewards', 'Provider', 'Reports', 'Audit'];
+const adminTabs: AdminTab[] = ['Dashboard', 'Services', 'Pricing', 'Vendors', 'Bookings', 'Plume Points', 'Provider', 'Experience', 'Reports', 'Audit'];
 
 const navItems: Array<{ key: Screen; label: string }> = [
   { key: 'home', label: 'Home' },
@@ -425,6 +519,8 @@ const navItems: Array<{ key: Screen; label: string }> = [
   { key: 'admin', label: 'Admin' },
 ];
 
+const plumeGoldThreshold = 500;
+
 const initialRewards: RewardLedgerEntry[] = [
   {
     id: 'launch-bonus',
@@ -433,7 +529,7 @@ const initialRewards: RewardLedgerEntry[] = [
     direction: 'credit',
     status: 'available',
     points: 1250,
-    reason: 'Launch wallet bonus',
+    reason: 'Launch Plume Point bonus',
     source: 'admin_adjustment',
     createdAt: '2026-08-26',
     availableAt: '2026-08-26',
@@ -442,16 +538,131 @@ const initialRewards: RewardLedgerEntry[] = [
   },
 ];
 
+const ratingOptions: Array<{ label: string; score: StarRating }> = [
+  { score: 1, label: '1 Star — We really missed the mark' },
+  { score: 2, label: '2 Stars — There’s definitely room to improve' },
+  { score: 3, label: '3 Stars — A solid experience' },
+  { score: 4, label: '4 Stars — We made your day easier' },
+  { score: 5, label: '5 Stars — Outstanding — this is the Flairo experience we strive for' },
+];
+
+const vendorConfidenceOptions: VendorConfidence[] = [
+  'Absolutely — I’d happily use them again',
+  'Maybe — it would depend on the situation',
+  'No — I’d prefer someone different next time',
+];
+
 const money = (value: number) => `$${value.toFixed(0)}`;
 const unitKey = (bedrooms: number, bathrooms: number) => `${bedrooms}-${bathrooms}`;
 const isPlusEligible = (status: MembershipStatus) => status === 'Active' || status === 'Trial';
+const starsForRating = (score: StarRating) => `${'★'.repeat(score)}${'☆'.repeat(5 - score)}`;
 
 function findCommunity(id: string) {
   return communities.find((community) => community.id === id) ?? communities[0];
 }
 
-function getAgreement(service: Service) {
-  return vendorAgreements.find((agreement) => agreement.id === service.vendorAgreementId) ?? vendorAgreements[0];
+function getAgreement(service: Service, surveys: CustomerExperienceSurvey[] = []) {
+  return rankVendorAgreementsForService(service, surveys)[0]
+    ?? vendorAgreements.find((agreement) => agreement.id === service.vendorAgreementId)
+    ?? vendorAgreements[0];
+}
+
+function rankVendorAgreementsForService(service: Service, surveys: CustomerExperienceSurvey[] = []) {
+  const fallback = vendorAgreements.find((agreement) => agreement.id === service.vendorAgreementId);
+  const eligible = vendorAgreements.filter(
+    (agreement) => agreement.active && agreement.serviceEligibility.includes(service.rewardCode),
+  );
+  const ranked = eligible.length ? eligible : fallback ? [fallback] : [];
+
+  return ranked.sort((first, second) => {
+    if (first.preferred !== second.preferred) return first.preferred ? -1 : 1;
+    const firstRating = vendorExperienceRating(first.vendorName, surveys, first.customerExperienceRating);
+    const secondRating = vendorExperienceRating(second.vendorName, surveys, second.customerExperienceRating);
+    if (secondRating !== firstRating) return secondRating - firstRating;
+    return first.vendorName.localeCompare(second.vendorName);
+  });
+}
+
+function vendorExperienceRating(vendorName: string, surveys: CustomerExperienceSurvey[], fallback: number) {
+  const completed = surveys.filter((survey) => survey.vendorName === vendorName && survey.status === 'Completed' && survey.rating);
+  if (!completed.length) return fallback;
+  const total = completed.reduce((sum, survey) => sum + (survey.rating ?? 0), 0);
+  return Math.round((total / completed.length) * 10) / 10;
+}
+
+function buildProviderExperienceStats(surveys: CustomerExperienceSurvey[]): ProviderExperienceStat[] {
+  return vendorAgreements
+    .map((agreement) => {
+      const completed = surveys.filter((survey) => survey.vendorName === agreement.vendorName && survey.status === 'Completed');
+      const averageRating = vendorExperienceRating(agreement.vendorName, surveys, agreement.customerExperienceRating);
+      const flaggedResponses = completed.filter((survey) => survey.flagged).length;
+      const confidentResponses = completed.filter((survey) => survey.vendorConfidence === vendorConfidenceOptions[0]).length;
+
+      return {
+        averageRating,
+        boardPriority: (agreement.preferred ? 100 : 0) + averageRating,
+        completedResponses: completed.length,
+        confidentResponses,
+        flaggedResponses,
+        preferred: agreement.preferred,
+        vendorName: agreement.vendorName,
+      };
+    })
+    .sort((first, second) => second.boardPriority - first.boardPriority);
+}
+
+function createSurveyForBooking(booking: Booking, completionDate: string): CustomerExperienceSurvey {
+  return {
+    bookingId: booking.id,
+    completionDate,
+    emailSentAt: new Date().toISOString(),
+    emailStatus: 'Sent',
+    flagged: false,
+    id: `CX-${booking.id}`,
+    inAppStatus: 'Pending',
+    residentEmail: booking.residentEmail,
+    residentName: booking.residentName,
+    serviceId: booking.serviceId,
+    serviceTitle: booking.serviceTitle,
+    status: 'Pending',
+    vendorAgreementId: booking.vendorAgreementId,
+    vendorName: booking.vendorName,
+  };
+}
+
+function isSurveyFlagged(rating: StarRating, vendorConfidence: VendorConfidence) {
+  return rating <= 2 || vendorConfidence === vendorConfidenceOptions[2];
+}
+
+function addHoursISO(date: Date, hours: number) {
+  return new Date(date.getTime() + hours * 60 * 60 * 1000).toISOString();
+}
+
+function formatDateTimeLabel(value?: string) {
+  if (!value) return 'Not set';
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return value;
+  return new Date(timestamp).toLocaleString('en-US', {
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    month: 'short',
+  });
+}
+
+function scheduleCountdown(booking: Booking) {
+  if (!booking.scheduleDueAt || booking.bookingStatus !== 'Claimed') return 'No active scheduling timer';
+  const diff = Date.parse(booking.scheduleDueAt) - Date.now();
+  if (diff <= 0) return 'Timer expired - job should return to the board';
+  const hours = Math.floor(diff / (60 * 60 * 1000));
+  const minutes = Math.max(0, Math.round((diff % (60 * 60 * 1000)) / (60 * 1000)));
+  return `${hours}h ${minutes}m left to enter schedule`;
+}
+
+function isScheduleOverdue(booking: Booking) {
+  return booking.bookingStatus === 'Claimed'
+    && Boolean(booking.scheduleDueAt)
+    && Date.parse(booking.scheduleDueAt ?? '') <= Date.now();
 }
 
 function getPricing(service: Service, resident: ResidentProfile | null) {
@@ -488,16 +699,18 @@ function createSettlementBooking({
   rewardConfig,
   resident,
   service,
+  surveys,
 }: {
   checkout: CheckoutQuote;
   completedRecurringCountIncludingThis: number;
   rewardConfig: RewardProgramConfig;
   resident: ResidentProfile;
   service: Service;
+  surveys: CustomerExperienceSurvey[];
 }): Booking {
   const community = findCommunity(resident.communityId);
   const pricing = getPricing(service, resident);
-  const agreement = getAgreement(service);
+  const agreement = getAgreement(service, surveys);
   const plusEligible = isPlusEligible(resident.membershipStatus);
   const selectedPrice = plusEligible ? pricing.plusPrice : pricing.standardPrice;
   const membershipLevel = membershipLevelFromStatus(resident.membershipStatus);
@@ -517,14 +730,16 @@ function createSettlementBooking({
   return {
     id: `BK-${Date.now().toString().slice(-6)}`,
     residentName: `${resident.firstName} ${resident.lastName}`,
+    residentEmail: resident.email,
     communityName: community.name,
     unitNumber: resident.unit.unitNumber,
     unitConfig: `${resident.unit.bedrooms}BR / ${resident.unit.bathrooms}BA`,
     serviceId: service.id,
     serviceTitle: service.title,
+    vendorAgreementId: agreement.id,
     vendorName: agreement.vendorName,
     bookingDate: 'Today',
-    serviceDate: 'Choose a time',
+    serviceDate: 'Schedule pending',
     membershipStatus: resident.membershipStatus,
     rewardServiceCode: service.rewardCode,
     originalEligibleSubtotal: checkout.originalServicePriceCents / 100,
@@ -550,6 +765,12 @@ function createSettlementBooking({
     reviewFlags: completionFlags,
     paymentStatus: 'Resident pays vendor',
     bookingStatus: 'Requested',
+    jobBoardStatus: agreement.preferred ? 'Preferred preview' : 'Available to vendor board',
+    providerExperienceScoreAtBooking: vendorExperienceRating(agreement.vendorName, surveys, agreement.customerExperienceRating),
+    providerPreferred: agreement.preferred,
+    providerPreferredFeePercent: agreement.preferred ? agreement.preferredFlairoFeePercent : plusEligible ? agreement.plusFlairoFeePercent : agreement.standardFlairoFeePercent,
+    preferredAccessEndsAt: agreement.preferred ? addHoursISO(new Date(), 1) : undefined,
+    scheduleTimerResets: 0,
     discountTreatment: agreement.discountTreatment,
   };
 }
@@ -562,22 +783,325 @@ export default function App() {
   const [serviceFilter, setServiceFilter] = useState<Filter>('Home Care');
   const [rewardDiscount, setRewardDiscount] = useState(false);
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [surveys, setSurveys] = useState<CustomerExperienceSurvey[]>([]);
+  const [surveyModalId, setSurveyModalId] = useState<string | null>(null);
+  const [surveyThankYou, setSurveyThankYou] = useState(false);
+  const [deferredSurveyIds, setDeferredSurveyIds] = useState<string[]>([]);
   const [rewardTransactions, setRewardTransactions] = useState<RewardLedgerEntry[]>(initialRewards);
   const [adminTab, setAdminTab] = useState<AdminTab>('Dashboard');
+  const [supabaseHealth, setSupabaseHealth] = useState<FlairoConnectionHealth | null>(null);
+  const [supabaseHealthError, setSupabaseHealthError] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [appUser, setAppUser] = useState<FlairoAppUser | null>(null);
+  const [accessIntent, setAccessIntent] = useState<AccessIntent>('resident');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<string[]>([
     'System seeded launch bonus with admin/system attribution.',
   ]);
+
+  const refreshFlairoAccess = async () => {
+    const current = await getCurrentFlairoAppUser();
+
+    if (current.data) {
+      setAppUser(current.data);
+      return current.data;
+    }
+
+    const claimed = await claimFlairoAppUser();
+
+    if (claimed.data) {
+      setAppUser(claimed.data);
+      return claimed.data;
+    }
+
+    setAppUser(null);
+
+    if (claimed.error) {
+      setAuthMessage('You are signed in, but this email is not connected to an active FLAIRO profile yet.');
+    } else if (current.error) {
+      setAuthMessage(current.error.message);
+    }
+
+    return null;
+  };
+
+  const routeSignedInUser = (profile: FlairoAppUser) => {
+    if (isFlairoAdminRole(profile.role)) {
+      setScreen('admin');
+      return;
+    }
+
+    if (profile.role === 'vendor') {
+      setScreen('bookings');
+      return;
+    }
+
+    setScreen('home');
+  };
+
+  const signInToFlairo = async () => {
+    if (!hasSupabaseConfig) {
+      setAuthMessage('Add the Supabase publishable key before live sign-in can be used.');
+      return;
+    }
+    if (!authEmail.trim() || !authPassword) {
+      setAuthMessage('Enter the email and password for this FLAIRO account.');
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthMessage(null);
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: authEmail.trim().toLowerCase(),
+      password: authPassword,
+    });
+
+    if (error) {
+      setAuthBusy(false);
+      setAuthMessage(error.message);
+      return;
+    }
+
+    setAuthUser(data.user ?? null);
+    const profile = await refreshFlairoAccess();
+
+    if (profile) {
+      if (!isResidentOrVendorRole(profile.role) && !isFlairoAdminRole(profile.role)) {
+        setAuthMessage('This account is signed in, but its FLAIRO role is not enabled for this mobile experience yet.');
+      } else {
+        routeSignedInUser(profile);
+      }
+    }
+
+    setAuthBusy(false);
+  };
+
+  const createResidentAuthAccount = async () => {
+    if (!hasSupabaseConfig) {
+      setAuthMessage('Add the Supabase publishable key before resident account creation can be used.');
+      return;
+    }
+    if (accessIntent !== 'resident') {
+      setAuthMessage('Vendor and admin access are invitation-only from the FLAIRO Control Center.');
+      return;
+    }
+    if (!authEmail.trim() || authPassword.length < 6) {
+      setAuthMessage('Use an email address and a password with at least six characters.');
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthMessage(null);
+
+    const { error } = await supabase.auth.signUp({
+      email: authEmail.trim().toLowerCase(),
+      password: authPassword,
+      options: {
+        data: {
+          requested_flairo_access: 'resident',
+        },
+      },
+    });
+
+    if (error) {
+      setAuthMessage(error.message);
+    } else {
+      setAuthMessage('Resident account created. Check your email if confirmation is required, then sign in to finish your FLAIRO profile.');
+    }
+
+    setAuthBusy(false);
+  };
+
+  const sendPasswordReset = async () => {
+    if (!hasSupabaseConfig) {
+      setAuthMessage('Add the Supabase publishable key before password reset can be used.');
+      return;
+    }
+    if (!authEmail.trim()) {
+      setAuthMessage('Enter your FLAIRO account email first.');
+      return;
+    }
+
+    setAuthBusy(true);
+    const { error } = await supabase.auth.resetPasswordForEmail(authEmail.trim().toLowerCase());
+    setAuthMessage(error ? error.message : 'If that email is registered, a reset message is on its way.');
+    setAuthBusy(false);
+  };
+
+  const signOutOfFlairo = async () => {
+    if (hasSupabaseConfig) {
+      await supabase.auth.signOut();
+    }
+
+    setAuthUser(null);
+    setAppUser(null);
+    setAuthMessage(null);
+    setScreen('home');
+  };
 
   const rewardSummary = useMemo(
     () => summarizeRewardAccount(rewardTransactions, rewardConfig),
     [rewardConfig, rewardTransactions],
   );
   const points = rewardSummary.availablePoints;
+  const canUseAdmin = isFlairoAdminRole(appUser?.role);
+
+  const pendingResidentSurvey = useMemo(
+    () => surveys.find(
+      (survey) =>
+        resident?.email === survey.residentEmail &&
+        survey.status === 'Pending' &&
+        !deferredSurveyIds.includes(survey.id),
+    ) ?? null,
+    [deferredSurveyIds, resident?.email, surveys],
+  );
+
+  const activeSurvey = useMemo(
+    () => surveys.find((survey) => survey.id === surveyModalId) ?? pendingResidentSurvey,
+    [pendingResidentSurvey, surveyModalId, surveys],
+  );
 
   const selectedService = useMemo(
     () => services.find((service) => service.id === selectedServiceId) ?? services[0],
     [selectedServiceId],
   );
+  const visibleNavItems = useMemo(
+    () => navItems.filter((item) => {
+      if (item.key === 'admin') return canUseAdmin;
+      if (item.key === 'register') return appUser?.role !== 'vendor';
+      return true;
+    }),
+    [appUser?.role, canUseAdmin],
+  );
+
+  useEffect(() => {
+    let active = true;
+
+    const loadSupabaseHealth = async () => {
+      const { data, error } = await checkFlairoSupabaseConnection();
+      if (!active) return;
+
+      if (error || !data) {
+        setSupabaseHealth(null);
+        setSupabaseHealthError(error instanceof Error ? error.message : 'Supabase connection check failed.');
+        return;
+      }
+
+      setSupabaseHealth(data);
+      setSupabaseHealthError(null);
+    };
+
+    loadSupabaseHealth();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!hasSupabaseConfig) {
+      setAuthReady(true);
+      return () => {
+        active = false;
+      };
+    }
+
+    const loadSession = async () => {
+      const { data, error } = await supabase.auth.getSession();
+      if (!active) return;
+
+      if (error) {
+        setAuthMessage(error.message);
+      }
+
+      const sessionUser = data.session?.user ?? null;
+      setAuthUser(sessionUser);
+
+      if (sessionUser) {
+        await refreshFlairoAccess();
+      }
+
+      setAuthReady(true);
+    };
+
+    loadSession();
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const sessionUser = session?.user ?? null;
+      setAuthUser(sessionUser);
+
+      if (!sessionUser) {
+        setAppUser(null);
+        return;
+      }
+
+      void refreshFlairoAccess();
+    });
+
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (screen === 'admin' && !canUseAdmin) {
+      setScreen('home');
+    }
+
+    if (screen === 'register' && appUser?.role === 'vendor') {
+      setScreen('home');
+    }
+  }, [appUser?.role, canUseAdmin, screen]);
+
+  useEffect(() => {
+    if (pendingResidentSurvey && !surveyModalId) {
+      setSurveyModalId(pendingResidentSurvey.id);
+      setSurveyThankYou(false);
+    }
+  }, [pendingResidentSurvey, surveyModalId]);
+
+  useEffect(() => {
+    setDeferredSurveyIds([]);
+  }, [screen]);
+
+  useEffect(() => {
+    const releaseExpiredClaims = () => {
+      setBookings((current) => {
+        const expired = current.filter(isScheduleOverdue);
+        if (!expired.length) return current;
+
+        setAuditEvents((events) => [
+          ...expired.map((booking) => `${todayISO()} / ${booking.id} returned to the vendor board after the 24-hour scheduling timer expired.`),
+          ...events,
+        ]);
+
+        return current.map((booking) => (
+          isScheduleOverdue(booking)
+            ? {
+              ...booking,
+              bookingStatus: 'Requested',
+              jobBoardStatus: 'Released',
+              paymentStatus: 'Returned to vendor board after scheduling timer expired',
+              scheduleDueAt: undefined,
+              vendorClaimedAt: undefined,
+            }
+            : booking
+        ));
+      });
+    };
+
+    releaseExpiredClaims();
+    const timer = setInterval(releaseExpiredClaims, 60000);
+    return () => clearInterval(timer);
+  }, []);
 
   const filteredServices = useMemo(() => {
     if (serviceFilter === 'All') return services;
@@ -599,7 +1123,7 @@ export default function App() {
     if (!resident) return;
     setResident({ ...resident, membershipStatus: status });
     setAuditEvents((current) => [
-      `${todayISO()} / Membership changed to ${status}. Future earning follows ${membershipLevelFromStatus(status).toUpperCase()} rules.`,
+      `${todayISO()} / Membership changed to ${status}. Future Plume Point earning is active only while FLAIRO Plus is active or in trial.`,
       ...current,
     ]);
   };
@@ -613,6 +1137,13 @@ export default function App() {
     const pricing = getPricing(selectedService, resident);
     const membershipLevel = membershipLevelFromStatus(resident.membershipStatus);
     const selectedPrice = membershipLevel === 'plus' ? pricing.plusPrice : pricing.standardPrice;
+    const agreement = getAgreement(selectedService, surveys);
+    const feePercent = agreement.preferred
+      ? agreement.preferredFlairoFeePercent
+      : membershipLevel === 'plus'
+        ? agreement.plusFlairoFeePercent
+        : agreement.standardFlairoFeePercent;
+    const bookingRewardConfig = { ...rewardConfig, referralFeePercent: feePercent };
     const serviceIsRecurring = serviceRule(selectedService.rewardCode, rewardConfig).recurringEligible;
     const completedRecurringCount = bookings.filter(
       (booking) => booking.bookingStatus === 'Completed' && serviceRule(booking.rewardServiceCode, rewardConfig).recurringEligible,
@@ -620,7 +1151,7 @@ export default function App() {
     const completedRecurringCountIncludingThis = serviceIsRecurring ? completedRecurringCount + 1 : 0;
     const checkout = calculateCheckoutQuote({
       availablePoints: rewardSummary.availablePoints,
-      config: rewardConfig,
+      config: bookingRewardConfig,
       membershipLevel,
       originalEligibleSubtotalCents: cents(pricing.standardPrice),
       requestedPoints: rewardDiscount ? rewardSummary.availablePoints : 0,
@@ -629,9 +1160,10 @@ export default function App() {
     const booking = createSettlementBooking({
       checkout,
       completedRecurringCountIncludingThis,
-      rewardConfig,
+      rewardConfig: bookingRewardConfig,
       resident,
       service: selectedService,
+      surveys,
     });
     const earned = calculateEarnedPoints({
       completedRecurringCountIncludingThis,
@@ -664,11 +1196,80 @@ export default function App() {
       ...current,
     ]);
     setAuditEvents((current) => [
-      `${todayISO()} / Booking ${booking.id} created with ${earned.totalPoints} pending points and ${checkout.appliedPoints} redeemed points.`,
+      `${todayISO()} / Booking ${booking.id} created with ${earned.totalPoints} pending Plume Points and ${checkout.appliedPoints} redeemed Plume Points.`,
       ...current,
     ]);
     setRewardDiscount(false);
     setScreen('bookings');
+  };
+
+  const claimBooking = (bookingId: string) => {
+    const booking = bookings.find((item) => item.id === bookingId);
+    if (!booking || booking.bookingStatus !== 'Requested') return;
+    const claimedAt = new Date().toISOString();
+    const scheduleDueAt = addHoursISO(new Date(), 24);
+
+    setBookings((current) => current.map((item) => (
+      item.id === bookingId
+        ? {
+          ...item,
+          bookingStatus: 'Claimed',
+          jobBoardStatus: 'Claimed',
+          paymentStatus: 'Vendor accepted; schedule due within 24 hours',
+          scheduleDueAt,
+          vendorClaimedAt: claimedAt,
+        }
+        : item
+    )));
+    setAuditEvents((current) => [
+      `${todayISO()} / ${booking.vendorName} accepted ${bookingId}; scheduling timer started and resident contact should be used to set the appointment.`,
+      ...current,
+    ]);
+  };
+
+  const scheduleBooking = (bookingId: string) => {
+    const booking = bookings.find((item) => item.id === bookingId);
+    if (!booking || booking.bookingStatus !== 'Claimed') return;
+    const scheduledAt = new Date().toISOString();
+    const serviceDate = formatDateTimeLabel(addHoursISO(new Date(), 48));
+
+    setBookings((current) => current.map((item) => (
+      item.id === bookingId
+        ? {
+          ...item,
+          bookingStatus: 'Scheduled',
+          jobBoardStatus: 'Scheduled',
+          paymentStatus: 'Scheduled with resident',
+          scheduledAt,
+          serviceDate,
+        }
+        : item
+    )));
+    setAuditEvents((current) => [
+      `${todayISO()} / ${booking.vendorName} scheduled ${bookingId} for ${serviceDate}.`,
+      ...current,
+    ]);
+  };
+
+  const resetScheduleTimer = (bookingId: string) => {
+    const booking = bookings.find((item) => item.id === bookingId);
+    if (!booking || booking.bookingStatus !== 'Claimed') return;
+    const scheduleDueAt = addHoursISO(new Date(), 24);
+
+    setBookings((current) => current.map((item) => (
+      item.id === bookingId
+        ? {
+          ...item,
+          paymentStatus: 'Admin reset scheduling timer after vendor outreach',
+          scheduleDueAt,
+          scheduleTimerResets: item.scheduleTimerResets + 1,
+        }
+        : item
+    )));
+    setAuditEvents((current) => [
+      `${todayISO()} / Admin reset the 24-hour scheduling timer for ${bookingId} after vendor contact.`,
+      ...current,
+    ]);
   };
 
   const confirmBooking = (bookingId: string) => {
@@ -677,13 +1278,22 @@ export default function App() {
       setAuditEvents((current) => [`${todayISO()} / Duplicate completion attempt blocked for ${bookingId}.`, ...current]);
       return;
     }
+    if (booking.bookingStatus !== 'Scheduled') {
+      setAuditEvents((current) => [`${todayISO()} / Completion blocked for ${bookingId}; vendor must enter the scheduled time first.`, ...current]);
+      return;
+    }
+
+    const completionDate = todayISO();
+    const existingSurvey = surveys.find((survey) => survey.bookingId === bookingId);
+    const nextSurvey = existingSurvey ?? createSurveyForBooking(booking, completionDate);
 
     setBookings((current) => current.map((item) => (
       item.id === bookingId
         ? {
           ...item,
           bookingStatus: 'Completed',
-          completionDate: todayISO(),
+          jobBoardStatus: 'Completed',
+          completionDate,
           paymentStatus: 'Completion and payment confirmed',
           pointStatus: 'available',
           settlementStatus: item.creditOffset > 0 ? 'Offset applied' : 'Unpaid',
@@ -691,8 +1301,45 @@ export default function App() {
         : item
     )));
     setRewardTransactions((current) => makeBookingPointsAvailable({ bookingId, entries: current }));
+    if (!existingSurvey) {
+      setSurveys((current) => [nextSurvey, ...current]);
+    }
+    setSurveyModalId(nextSurvey.id);
+    setSurveyThankYou(false);
     setAuditEvents((current) => [
-      `${todayISO()} / Provider confirmed completion and payment for ${bookingId}; pending points are now available.`,
+      `${todayISO()} / Customer Experience survey sent to ${booking.residentEmail} and queued for the next in-app visit.`,
+      `${todayISO()} / Provider confirmed completion and payment for ${bookingId}; pending Plume Points are now available.`,
+      ...current,
+    ]);
+  };
+
+  const submitSurvey = (
+    surveyId: string,
+    rating: StarRating,
+    vendorConfidence: VendorConfidence,
+    submittedBy: SurveyChannel,
+  ) => {
+    const label = ratingOptions.find((option) => option.score === rating)?.label ?? `${rating} Stars`;
+    const flagged = isSurveyFlagged(rating, vendorConfidence);
+    setSurveys((current) => current.map((survey) => (
+      survey.id === surveyId
+        ? {
+          ...survey,
+          emailStatus: 'Completed',
+          flagged,
+          inAppStatus: 'Completed',
+          rating,
+          ratingLabel: label,
+          status: 'Completed',
+          submittedAt: new Date().toISOString(),
+          submittedBy,
+          vendorConfidence,
+        }
+        : survey
+    )));
+    setSurveyThankYou(true);
+    setAuditEvents((current) => [
+      `${todayISO()} / Customer Experience survey ${surveyId} submitted${flagged ? ' and flagged for follow-up' : ''}.`,
       ...current,
     ]);
   };
@@ -706,6 +1353,7 @@ export default function App() {
         ? {
           ...item,
           bookingStatus: 'Refunded',
+          jobBoardStatus: 'Released',
           paymentStatus: 'Refund/dispute recorded',
           pointStatus: 'reversed',
           settlementStatus: 'Disputed',
@@ -716,13 +1364,13 @@ export default function App() {
       createReversalEntry({
         bookingId,
         points: booking.earnedTotalPoints,
-        reason: 'Refund or dispute reversed earned reward points',
+        reason: 'Refund or dispute reversed earned Plume Points',
         residentId: 'demo-resident',
       }),
       ...current,
     ]);
     setAuditEvents((current) => [
-      `${todayISO()} / Refund or dispute reversed ${booking.earnedTotalPoints} points for ${bookingId}.`,
+      `${todayISO()} / Refund or dispute reversed ${booking.earnedTotalPoints} Plume Points for ${bookingId}.`,
       ...current,
     ]);
   };
@@ -731,13 +1379,13 @@ export default function App() {
     const runDate = addMonths(todayISO(), rewardConfig.expirationMonthsWithoutActivity + 1);
     const expirationEntries = createExpirationEntries({ createdAt: runDate, entries: rewardTransactions });
     if (expirationEntries.length === 0) {
-      setAuditEvents((current) => [`${todayISO()} / Expiration batch found no eligible points.`, ...current]);
+      setAuditEvents((current) => [`${todayISO()} / Expiration batch found no eligible Plume Points.`, ...current]);
       return;
     }
 
     setRewardTransactions((current) => [...expirationEntries, ...current]);
     setAuditEvents((current) => [
-      `${todayISO()} / Expiration batch created ${expirationEntries.length} ledger entries using the configured inactivity rule.`,
+      `${todayISO()} / Expiration batch created ${expirationEntries.length} Plume Point ledger entries using the configured inactivity rule.`,
       ...current,
     ]);
   };
@@ -751,14 +1399,14 @@ export default function App() {
     });
     setRewardTransactions((current) => [{ ...entry, id: `${entry.id}-${Date.now()}` }, ...current]);
     setAuditEvents((current) => [
-      `${todayISO()} / Admin adjustment ${pointsDelta > 0 ? '+' : ''}${pointsDelta} points: ${reason}.`,
+      `${todayISO()} / Admin adjustment ${pointsDelta > 0 ? '+' : ''}${pointsDelta} Plume Points: ${reason}.`,
       ...current,
     ]);
   };
 
   const updateRewardConfig = (patch: Partial<RewardProgramConfig>) => {
     setRewardConfig((current) => ({ ...current, ...patch }));
-    setAuditEvents((current) => [`${todayISO()} / Reward program configuration updated.`, ...current]);
+    setAuditEvents((current) => [`${todayISO()} / Plume Point configuration updated.`, ...current]);
   };
 
   const content = useMemo(() => {
@@ -782,6 +1430,7 @@ export default function App() {
           selectedServiceId={selectedServiceId}
           setRewardDiscount={setRewardDiscount}
           setSelectedServiceId={setSelectedServiceId}
+          surveys={surveys}
         />
       );
     }
@@ -804,8 +1453,10 @@ export default function App() {
       return (
         <Bookings
           bookings={bookings}
+          claimBooking={claimBooking}
           confirmBooking={confirmBooking}
           reverseBooking={reverseBooking}
+          scheduleBooking={scheduleBooking}
           setScreen={setScreen}
         />
       );
@@ -822,8 +1473,10 @@ export default function App() {
           rewardConfig={rewardConfig}
           rewardSummary={rewardSummary}
           rewardTransactions={rewardTransactions}
+          resetScheduleTimer={resetScheduleTimer}
           runExpirationBatch={runExpirationBatch}
           setAdminTab={setAdminTab}
+          surveys={surveys}
           updateRewardConfig={updateRewardConfig}
         />
       );
@@ -833,11 +1486,27 @@ export default function App() {
       return <Profile points={points} resident={resident} rewardSummary={rewardSummary} setScreen={setScreen} updateMembership={updateMembership} />;
     }
 
-    return <Home bookings={bookings} points={points} resident={resident} rewardSummary={rewardSummary} setScreen={setScreen} supabaseReady={hasSupabaseConfig} />;
+    return (
+      <Home
+        appUser={appUser}
+        bookings={bookings}
+        canUseAdmin={canUseAdmin}
+        onSignOut={signOutOfFlairo}
+        points={points}
+        resident={resident}
+        rewardSummary={rewardSummary}
+        setScreen={setScreen}
+        supabaseHealth={supabaseHealth}
+        supabaseHealthError={supabaseHealthError}
+        supabaseReady={hasSupabaseConfig}
+      />
+    );
   }, [
+    appUser,
     adminTab,
     auditEvents,
     bookings,
+    canUseAdmin,
     filteredServices,
     points,
     resident,
@@ -849,7 +1518,35 @@ export default function App() {
     selectedService,
     selectedServiceId,
     serviceFilter,
+    surveys,
   ]);
+
+  if (!authReady) {
+    return <AccessLoading />;
+  }
+
+  if (!hasSupabaseConfig || !authUser || !appUser || (!isResidentOrVendorRole(appUser.role) && !canUseAdmin)) {
+    return (
+      <AccessGate
+        accessIntent={accessIntent}
+        appUser={appUser}
+        authBusy={authBusy}
+        authEmail={authEmail}
+        authMessage={authMessage}
+        authPassword={authPassword}
+        authUser={authUser}
+        onCreateResidentAccount={createResidentAuthAccount}
+        onForgotPassword={sendPasswordReset}
+        onRefreshAccess={refreshFlairoAccess}
+        onSignIn={signInToFlairo}
+        onSignOut={signOutOfFlairo}
+        setAccessIntent={setAccessIntent}
+        setAuthEmail={setAuthEmail}
+        setAuthPassword={setAuthPassword}
+        supabaseReady={hasSupabaseConfig}
+      />
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -867,7 +1564,7 @@ export default function App() {
           </TouchableOpacity>
           <TouchableOpacity accessibilityRole="button" onPress={() => setScreen('profile')} style={styles.pointsPill}>
             <Text style={styles.pointsPillText}>{points.toLocaleString()}</Text>
-            <Text style={styles.pointsPillLabel}>PTS</Text>
+            <Text style={styles.pointsPillLabel}>PLUME</Text>
           </TouchableOpacity>
         </View>
 
@@ -875,8 +1572,21 @@ export default function App() {
           {content}
         </ScrollView>
 
+        <CustomerExperienceSurveyModal
+          onClose={() => {
+            if (activeSurvey?.status === 'Pending') {
+              setDeferredSurveyIds((current) => Array.from(new Set([...current, activeSurvey.id])));
+            }
+            setSurveyModalId(null);
+            setSurveyThankYou(false);
+          }}
+          onSubmit={submitSurvey}
+          survey={activeSurvey}
+          thankYou={surveyThankYou}
+        />
+
         <View style={styles.nav}>
-          {navItems.map((item) => (
+          {visibleNavItems.map((item) => (
             <TouchableOpacity
               accessibilityRole="button"
               accessibilityState={{ selected: screen === item.key }}
@@ -894,19 +1604,189 @@ export default function App() {
   );
 }
 
+function AccessLoading() {
+  return (
+    <SafeAreaView style={styles.safe}>
+      <StatusBar style="light" />
+      <View style={styles.accessShell}>
+        <Image resizeMode="contain" source={fullLogo} style={styles.accessLogo} />
+        <Text style={styles.cardLabelGold}>FLAIRO SECURE ENTRY</Text>
+        <Text style={styles.panelTitle}>Checking your FLAIRO access.</Text>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function AccessGate({
+  accessIntent,
+  appUser,
+  authBusy,
+  authEmail,
+  authMessage,
+  authPassword,
+  authUser,
+  onCreateResidentAccount,
+  onForgotPassword,
+  onRefreshAccess,
+  onSignIn,
+  onSignOut,
+  setAccessIntent,
+  setAuthEmail,
+  setAuthPassword,
+  supabaseReady,
+}: {
+  accessIntent: AccessIntent;
+  appUser: FlairoAppUser | null;
+  authBusy: boolean;
+  authEmail: string;
+  authMessage: string | null;
+  authPassword: string;
+  authUser: AuthUser | null;
+  onCreateResidentAccount: () => void;
+  onForgotPassword: () => void;
+  onRefreshAccess: () => void;
+  onSignIn: () => void;
+  onSignOut: () => void;
+  setAccessIntent: (intent: AccessIntent) => void;
+  setAuthEmail: (value: string) => void;
+  setAuthPassword: (value: string) => void;
+  supabaseReady: boolean;
+}) {
+  const intentCopy: Record<AccessIntent, { action: string; detail: string; title: string }> = {
+    admin: {
+      action: 'Sign in as FLAIRO Admin',
+      detail: 'Administrative access remains invitation-only and private while the control center is locked down.',
+      title: 'FLAIRO Admin',
+    },
+    resident: {
+      action: 'Resident Login',
+      detail: 'Residents see only their home, bookings, Plume Points, surveys, and FLAIRO Plus benefits.',
+      title: 'Resident Access',
+    },
+    vendor: {
+      action: 'Vendor Login',
+      detail: 'Vendors see only eligible job-board requests, claimed work, scheduling timers, and their own records.',
+      title: 'Vendor Access',
+    },
+  };
+  const activeCopy = intentCopy[accessIntent];
+
+  return (
+    <SafeAreaView style={styles.safe}>
+      <StatusBar style="light" />
+      <ScrollView contentContainerStyle={styles.accessScroll} showsVerticalScrollIndicator={false}>
+        <View style={styles.accessCard}>
+          <Image resizeMode="contain" source={fullLogo} style={styles.accessLogo} />
+          <Text style={styles.eyebrow}>WELCOME TO FLAIRO</Text>
+          <Text style={styles.hero}>Exclusive perks. Elevated living.</Text>
+          <Text style={styles.heroBody}>
+            Sign in so FLAIRO can match you to the right resident, vendor, or administrative experience.
+          </Text>
+
+          <View style={styles.accessIntentRow}>
+            {(['resident', 'vendor', 'admin'] as AccessIntent[]).map((intent) => (
+              <TouchableOpacity
+                accessibilityRole="button"
+                key={intent}
+                onPress={() => setAccessIntent(intent)}
+                style={[styles.accessIntentButton, accessIntent === intent && styles.optionButtonActive]}
+              >
+                <Text style={[styles.optionText, accessIntent === intent && styles.optionTextActive]}>
+                  {intentCopy[intent].title}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <View style={styles.infoPanel}>
+            <Text style={styles.cardLabelGold}>{activeCopy.title.toUpperCase()}</Text>
+            <Text style={styles.bodyMuted}>{activeCopy.detail}</Text>
+          </View>
+
+          {!supabaseReady ? (
+            <View style={styles.warningPanel}>
+              <Text style={styles.cardLabelPink}>SUPABASE KEY NEEDED</Text>
+              <Text style={styles.bodyMuted}>
+                The mobile app has the Supabase project URL, but it still needs the publishable key before live sign-in can work.
+              </Text>
+            </View>
+          ) : null}
+
+          {authUser && !appUser ? (
+            <View style={styles.warningPanel}>
+              <Text style={styles.cardLabelPink}>PROFILE ACCESS PENDING</Text>
+              <Text style={styles.bodyMuted}>
+                {authUser.email ?? 'This account'} is signed in, but FLAIRO has not connected this email to an active role profile yet.
+              </Text>
+              <View style={styles.actionRow}>
+                <TouchableOpacity disabled={authBusy} onPress={onRefreshAccess} style={styles.ghostButtonWideHalf}>
+                  <Text style={styles.ghostButtonText}>Check again</Text>
+                </TouchableOpacity>
+                <TouchableOpacity disabled={authBusy} onPress={onSignOut} style={styles.ghostButtonWideHalf}>
+                  <Text style={styles.ghostButtonText}>Sign out</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.formPanel}>
+              <FormField label="Email" value={authEmail} onChangeText={setAuthEmail} keyboardType="email-address" />
+              <FormField label="Password" value={authPassword} onChangeText={setAuthPassword} secureTextEntry />
+
+              {authMessage ? <Text style={styles.errorText}>{authMessage}</Text> : null}
+
+              <TouchableOpacity disabled={authBusy || !supabaseReady} style={[styles.primaryButtonWide, (authBusy || !supabaseReady) && styles.disabledButton]} onPress={onSignIn}>
+                <Text style={styles.primaryButtonText}>{authBusy ? 'Checking access...' : activeCopy.action}</Text>
+              </TouchableOpacity>
+
+              {accessIntent === 'resident' ? (
+                <TouchableOpacity disabled={authBusy || !supabaseReady} style={[styles.ghostButtonWide, (authBusy || !supabaseReady) && styles.disabledButton]} onPress={onCreateResidentAccount}>
+                  <Text style={styles.ghostButtonText}>Create Resident Account</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity disabled={authBusy} style={styles.ghostButtonWide} onPress={onCreateResidentAccount}>
+                  <Text style={styles.ghostButtonText}>Request {accessIntent === 'vendor' ? 'Vendor' : 'Admin'} Access</Text>
+                </TouchableOpacity>
+              )}
+
+              <TouchableOpacity disabled={authBusy || !supabaseReady} style={styles.textButton} onPress={onForgotPassword}>
+                <Text style={styles.sectionLink}>Forgot Password</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <View style={styles.infoPanel}>
+            <Text style={styles.cardLabelPink}>CONTACT FLAIRO SUPPORT</Text>
+            <Text style={styles.bodyMuted}>info@flairo.org</Text>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
 function Home({
+  appUser,
   bookings,
+  canUseAdmin,
+  onSignOut,
   points,
   resident,
   rewardSummary,
   setScreen,
+  supabaseHealth,
+  supabaseHealthError,
   supabaseReady,
 }: {
+  appUser: FlairoAppUser | null;
   bookings: Booking[];
+  canUseAdmin: boolean;
+  onSignOut: () => void;
   points: number;
   resident: ResidentProfile | null;
   rewardSummary: RewardAccountSummary;
   setScreen: (screen: Screen) => void;
+  supabaseHealth: FlairoConnectionHealth | null;
+  supabaseHealthError: string | null;
   supabaseReady: boolean;
 }) {
   const community = resident ? findCommunity(resident.communityId) : communities[0];
@@ -920,31 +1800,44 @@ function Home({
         <Text style={styles.eyebrow}>EXCLUSIVE PERKS. ELEVATED LIVING.</Text>
         <Text style={styles.hero}>Resident services, priced for your home.</Text>
         <Text style={styles.heroBody}>
-          FLAIRO now captures resident, community, unit, membership, rewards, booking, and provider economics in one flow.
+          Your home services, FLAIRO Plus benefits, Plume Points, and booking updates stay together after you sign in.
         </Text>
         <View style={styles.heroActions}>
           <TouchableOpacity style={styles.primaryButton} onPress={() => setScreen(resident ? 'services' : 'register')}>
             <Text style={styles.primaryButtonText}>{resident ? 'Book Home Care' : 'Create account'}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.ghostButton} onPress={() => setScreen('admin')}>
-            <Text style={styles.ghostButtonText}>Admin model</Text>
-          </TouchableOpacity>
+          {canUseAdmin ? (
+            <TouchableOpacity style={styles.ghostButton} onPress={() => setScreen('admin')}>
+              <Text style={styles.ghostButtonText}>Admin Control</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
+      </View>
+
+      <View style={styles.infoPanel}>
+        <Text style={styles.cardLabelGold}>SIGNED IN</Text>
+        <PriceLine label="Account" value={appUser?.email ?? 'Supabase session'} />
+        <PriceLine label="FLAIRO role" value={appUser?.role.replace(/_/g, ' ') ?? 'pending'} />
+        <TouchableOpacity style={styles.ghostButtonWide} onPress={onSignOut}>
+          <Text style={styles.ghostButtonText}>Sign out</Text>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.statGrid}>
         <StatCard label="Home" value={resident ? resident.unit.unitNumber : 'Not set'} detail={resident ? `${resident.unit.bedrooms}BR / ${resident.unit.bathrooms}BA` : 'Register first'} />
         <StatCard label="Plus" value={isPlusEligible(activeStatus) ? activeStatus : 'Off'} detail={community.plusAvailable ? 'available here' : 'not enabled'} />
-        <StatCard label="Rewards" value={points.toLocaleString()} detail={`${rewardSummary.pendingPoints.toLocaleString()} pending`} />
+        <StatCard label="Plume Points" value={points.toLocaleString()} detail={`${formatCents(rewardSummary.outstandingLiabilityCents)} redeemable`} />
       </View>
 
       <View style={styles.infoPanel}>
         <Text style={supabaseReady ? styles.cardLabelGold : styles.cardLabelPink}>
-          {supabaseReady ? 'SUPABASE CONNECTED' : 'SUPABASE KEY NEEDED'}
+          {supabaseHealth?.database_ready ? 'LIVE FLAIRO TABLES CONNECTED' : supabaseReady ? 'SUPABASE CONFIGURED' : 'SUPABASE KEY NEEDED'}
         </Text>
         <Text style={styles.bodyMuted}>
-          {supabaseReady
-            ? 'The mobile app has the project URL and public key needed for live Auth and database calls.'
+          {supabaseHealth?.database_ready
+            ? `${supabaseHealth.flairo_table_count} FLAIRO tables are reachable for Auth, booking, rewards, survey, vendor, and invoice workflows.`
+            : supabaseReady
+              ? supabaseHealthError ?? 'The mobile app has the project URL and public key needed for live Auth and database calls.'
             : 'The project URL is set. Paste the Supabase publishable key into .env to turn on live Auth and database calls.'}
         </Text>
       </View>
@@ -980,7 +1873,7 @@ function Home({
 
       <View style={styles.benefitStrip}>
         <BenefitTile title="Resident -> Provider" detail="Direct payment model" />
-        <BenefitTile title="Rewards ledger" detail="Every point traced" />
+        <BenefitTile title="Plume ledger" detail="Every credit traced" />
         <BenefitTile title="Configurable" detail="Rules, caps, pricing" />
       </View>
     </View>
@@ -1104,6 +1997,7 @@ function Services({
   selectedServiceId,
   setRewardDiscount,
   setSelectedServiceId,
+  surveys,
 }: {
   bookService: () => void;
   bookings: Booking[];
@@ -1118,12 +2012,19 @@ function Services({
   selectedServiceId: string;
   setRewardDiscount: (value: boolean) => void;
   setSelectedServiceId: (id: string) => void;
+  surveys: CustomerExperienceSurvey[];
 }) {
   const pricing = getPricing(selectedService, resident);
-  const agreement = getAgreement(selectedService);
+  const agreement = getAgreement(selectedService, surveys);
   const plusEligible = resident ? isPlusEligible(resident.membershipStatus) : false;
   const membershipLevel = membershipLevelFromStatus(resident?.membershipStatus);
   const selectedPrice = plusEligible ? pricing.plusPrice : pricing.standardPrice;
+  const flairoFeePercent = agreement.preferred
+    ? agreement.preferredFlairoFeePercent
+    : membershipLevel === 'plus'
+      ? agreement.plusFlairoFeePercent
+      : agreement.standardFlairoFeePercent;
+  const quoteRewardConfig = { ...rewardConfig, referralFeePercent: flairoFeePercent };
   const serviceIsRecurring = serviceRule(selectedService.rewardCode, rewardConfig).recurringEligible;
   const completedRecurringCount = bookings.filter(
     (booking) => booking.bookingStatus === 'Completed' && serviceRule(booking.rewardServiceCode, rewardConfig).recurringEligible,
@@ -1131,7 +2032,7 @@ function Services({
   const recurringCountForQuote = serviceIsRecurring ? completedRecurringCount + 1 : 0;
   const checkout = calculateCheckoutQuote({
     availablePoints: rewardSummary.availablePoints,
-    config: rewardConfig,
+    config: quoteRewardConfig,
     membershipLevel,
     originalEligibleSubtotalCents: cents(pricing.standardPrice),
     requestedPoints: rewardDiscount ? rewardSummary.availablePoints : 0,
@@ -1204,14 +2105,16 @@ function Services({
           <PriceLine label="Standard price" value={money(pricing.standardPrice)} />
           <PriceLine label="FLAIRO PLUS price" value={`${money(pricing.plusPrice)} / save ${money(savings)}`} />
           <PriceLine label="Eligible PLUS status" value={plusEligible ? resident?.membershipStatus ?? 'None' : 'Not active'} />
-          <PriceLine label="Available balance" value={`${rewardSummary.availablePoints.toLocaleString()} pts / ${formatCents(pointsToCreditCents(rewardSummary.availablePoints, rewardConfig))}`} />
-          <PriceLine label="Maximum points applied" value={`${checkout.maxRedeemablePoints.toLocaleString()} pts`} />
-          <PriceLine label="Reward credit" value={checkout.residentCreditCents > 0 ? `-${formatCents(checkout.residentCreditCents)} / ${checkout.appliedPoints.toLocaleString()} pts` : 'None applied'} />
+          <PriceLine label="Available Plume Points" value={`${rewardSummary.availablePoints.toLocaleString()} / ${formatCents(pointsToCreditCents(rewardSummary.availablePoints, rewardConfig))}`} />
+          <PriceLine label="Maximum Plume Points applied" value={checkout.maxRedeemablePoints.toLocaleString()} />
+          <PriceLine label="Plume Point credit" value={checkout.residentCreditCents > 0 ? `-${formatCents(checkout.residentCreditCents)} / ${checkout.appliedPoints.toLocaleString()} Plume Points` : 'None applied'} />
           <PriceLine label="Resident pays provider" value={formatCents(checkout.residentPaysProviderCents)} emphasized />
-          <PriceLine label="Points after completion" value={`${earned.totalPoints.toLocaleString()} pts (${earned.basePoints} base + ${earned.completionBonusPoints} bonus${earned.recurringBonusPoints ? ` + ${earned.recurringBonusPoints} loyalty` : ''})`} />
-          <PriceLine label="PLUS advantage" value={plusEligible ? `${earned.plusAdditionalPoints.toLocaleString()} extra pts and ${money(savings)} saved` : `Upgrade: +${Math.max(plusEarned.totalPoints - freeEarned.totalPoints, 0).toLocaleString()} pts / ${money(savings)} saved`} />
+          <PriceLine label="Plume Points after completion" value={plusEligible ? `${earned.totalPoints.toLocaleString()} (${earned.basePoints} base + ${earned.completionBonusPoints} bonus${earned.recurringBonusPoints ? ` + ${earned.recurringBonusPoints} loyalty` : ''})` : 'Join FLAIRO Plus to earn'} />
+          <PriceLine label="PLUS advantage" value={plusEligible ? `${earned.plusAdditionalPoints.toLocaleString()} extra Plume Points and ${money(savings)} saved` : `Upgrade: +${Math.max(plusEarned.totalPoints - freeEarned.totalPoints, 0).toLocaleString()} Plume Points / ${money(savings)} saved`} />
+          <PriceLine label="Provider" value={`${agreement.vendorName}${agreement.preferred ? ' / Preferred FLAIRO vendor' : ''}`} />
+          <PriceLine label="Provider rating" value={`${vendorExperienceRating(agreement.vendorName, surveys, agreement.customerExperienceRating).toFixed(1)} customer experience avg`} />
           <PriceLine label="Payment route" value="Resident pays connected vendor" />
-          <PriceLine label="Gross 10% referral fee" value={formatCents(checkout.grossReferralFeeCents)} />
+          <PriceLine label={`Gross ${flairoFeePercent}% referral fee`} value={formatCents(checkout.grossReferralFeeCents)} />
           <PriceLine label="Credit offset" value={formatCents(checkout.creditOffsetCents)} />
           <PriceLine label="Net owed to FLAIRO" value={formatCents(checkout.netReferralFeeOwedCents)} />
           <PriceLine label="Discount funding" value={agreement.discountTreatment} />
@@ -1224,7 +2127,7 @@ function Services({
           style={[styles.ghostButtonWide, rewardDiscount && styles.ghostButtonSelected, !canRedeem && styles.disabledButton]}
         >
           <Text style={styles.ghostButtonText}>
-            {rewardDiscount ? 'Reward applied' : canRedeem ? `Apply up to ${checkout.maxRedeemablePoints.toLocaleString()} pts` : 'Reach threshold to redeem'}
+            {rewardDiscount ? 'Plume credit applied' : canRedeem ? `Apply up to ${checkout.maxRedeemablePoints.toLocaleString()} Plume Points` : 'Join Plus or reach threshold to redeem'}
           </Text>
         </TouchableOpacity>
 
@@ -1236,6 +2139,7 @@ function Services({
       <Text style={styles.sectionTitle}>Marketplace services</Text>
       {filteredServices.map((service) => {
         const servicePricing = getPricing(service, resident);
+        const topProvider = getAgreement(service, surveys);
         return (
           <TouchableOpacity
             accessibilityRole="button"
@@ -1251,14 +2155,79 @@ function Services({
               </View>
               <Text style={styles.cardTitle}>{service.title}</Text>
               <Text style={styles.bodyMuted}>{service.subtitle}</Text>
+              <View style={styles.preferredProviderLine}>
+                {topProvider.preferred ? <Image resizeMode="cover" source={goldIcon} style={styles.inlineFlamingo} /> : null}
+                <Text style={topProvider.preferred ? styles.glitterProviderText : styles.providerText}>
+                  {topProvider.vendorName} / {vendorExperienceRating(topProvider.vendorName, surveys, topProvider.customerExperienceRating).toFixed(1)} CX
+                </Text>
+              </View>
               <View style={styles.serviceMetaRow}>
                 <Text style={styles.metaText}>{service.duration}</Text>
-                <Text style={styles.pointsEarn}>Bonus {serviceRule(service.rewardCode, rewardConfig).freeCompletionBonus}/{serviceRule(service.rewardCode, rewardConfig).plusCompletionBonus} pts</Text>
+                <Text style={styles.pointsEarn}>PLUS earns {serviceRule(service.rewardCode, rewardConfig).plusCompletionBonus} Plume Points</Text>
               </View>
             </View>
           </TouchableOpacity>
         );
       })}
+    </View>
+  );
+}
+
+function PlumeBalanceDisplay({
+  points,
+  redemptionValue,
+}: {
+  points: number;
+  redemptionValue: string;
+}) {
+  const rotation = useRef(new Animated.Value(0)).current;
+  const isGold = points >= plumeGoldThreshold;
+  const isPink = points > 0 && !isGold;
+
+  useEffect(() => {
+    if (!isGold) {
+      rotation.stopAnimation();
+      rotation.setValue(0);
+      return undefined;
+    }
+
+    const loop = Animated.loop(
+      Animated.timing(rotation, {
+        duration: 10000,
+        easing: Easing.linear,
+        toValue: 1,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isGold, rotation]);
+
+  const spin = rotation.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  return (
+    <View style={styles.plumeDisplay}>
+      {isGold ? (
+        <Animated.View style={[styles.plumeWreath, { transform: [{ rotate: spin }] }]}>
+          {plumeFeatherPositions.map((position, index) => (
+            <View key={index} style={[styles.plumeFeather, position]} />
+          ))}
+        </Animated.View>
+      ) : null}
+      <Text
+        style={[
+          styles.plumeNumber,
+          points === 0 && styles.plumeNumberWhite,
+          isPink && styles.plumeNumberPink,
+          isGold && styles.plumeNumberGold,
+        ]}
+      >
+        {points.toLocaleString()}
+      </Text>
+      <Text style={styles.plumeValue}>{redemptionValue} available for redemption</Text>
     </View>
   );
 }
@@ -1289,22 +2258,25 @@ function Rewards({
   const membership = membershipLevel === 'plus' ? rewardConfig.plus : rewardConfig.free;
   const recommended = completedRecurringCount === 0
     ? 'Recurring housekeeping unlocks the fastest loyalty milestone.'
-    : 'Pet care and handyman work are good next reward categories.';
+    : 'Pet care and handyman work are good next Plume Point categories.';
 
   return (
     <View>
       <PageIntro
-        kicker="FLAIRO REWARDS"
-        title="Points, credits, and loyalty progress."
-        body="Every point now lives in a ledger: pending, available, redeemed, reversed, or expired."
+        kicker="FLAIRO PLUME POINTS"
+        title="Your service credits, kept simple."
+        body="FLAIRO Plus members earn Plume Points on eligible services, and every credit is tracked from pending to redeemed."
       />
       <View style={styles.walletHero}>
         <Image resizeMode="cover" source={goldIcon} style={styles.walletIcon} />
         <View style={styles.walletCopy}>
-          <Text style={styles.cardLabelGold}>CURRENT BALANCE</Text>
-          <Text style={styles.walletNumber}>{rewardSummary.availablePoints.toLocaleString()}</Text>
+          <Text style={styles.cardLabelGold}>CURRENT PLUME BALANCE</Text>
+          <PlumeBalanceDisplay
+            points={rewardSummary.availablePoints}
+            redemptionValue={formatCents(pointsToCreditCents(rewardSummary.availablePoints, rewardConfig))}
+          />
           <Text style={styles.bodyMuted}>
-            {formatCents(rewardSummary.outstandingLiabilityCents)} available / {rewardSummary.pendingPoints.toLocaleString()} pending pts
+            {rewardSummary.pendingPoints.toLocaleString()} pending Plume Points will unlock after completion is confirmed.
           </Text>
         </View>
       </View>
@@ -1312,22 +2284,22 @@ function Rewards({
       {rewardSummary.negativeBalance ? (
         <View style={styles.warningPanel}>
           <Text style={styles.cardLabelPink}>NEGATIVE BALANCE</Text>
-          <Text style={styles.bodyMuted}>Refunds or reversals exceeded available points. Future earnings will recover the balance before new credits can be used.</Text>
+          <Text style={styles.bodyMuted}>Refunds or reversals exceeded available Plume Points. Future Plus earnings will recover the balance before new credits can be used.</Text>
         </View>
       ) : null}
 
       <View style={styles.statGrid}>
-        <StatCard label="Earned" value={rewardSummary.lifetimePointsEarned.toLocaleString()} detail="lifetime points" />
-        <StatCard label="Redeemed" value={formatCents(rewardSummary.lifetimeRewardsRedeemedCents)} detail={`${rewardSummary.redeemedPoints.toLocaleString()} pts`} />
-        <StatCard label="PLUS" value={rewardSummary.plusAdditionalPointsEarned.toLocaleString()} detail="extra points earned" />
+        <StatCard label="Earned" value={rewardSummary.lifetimePointsEarned.toLocaleString()} detail="lifetime Plume Points" />
+        <StatCard label="Redeemed" value={formatCents(rewardSummary.lifetimeRewardsRedeemedCents)} detail={`${rewardSummary.redeemedPoints.toLocaleString()} Plume Points`} />
+        <StatCard label="PLUS" value={rewardSummary.plusAdditionalPointsEarned.toLocaleString()} detail="extra Plume Points earned" />
       </View>
 
       <View style={styles.infoPanel}>
         <Text style={styles.cardLabelPink}>MY PROGRAM</Text>
         <PriceLine label="Membership" value={`${membership.label}${membershipLevel === 'plus' ? ' / $5 monthly' : ''}`} />
-        <PriceLine label="Earn rate" value={`${membership.basePointsPerDollar} point${membership.basePointsPerDollar === 1 ? '' : 's'} per $1`} />
-        <PriceLine label="Redemption starts at" value={`${membership.redemptionThresholdPoints.toLocaleString()} pts`} />
-        <PriceLine label="Point value" value="100 pts = $1 service credit" />
+        <PriceLine label="Earn rate" value={membershipLevel === 'plus' ? `${membership.basePointsPerDollar} Plume Points per $1` : 'FLAIRO Plus required to earn'} />
+        <PriceLine label="Redemption starts at" value={membershipLevel === 'plus' ? `${membership.redemptionThresholdPoints.toLocaleString()} Plume Points` : 'Available with Plus membership'} />
+        <PriceLine label="Plume Point value" value="100 Plume Points = $1 service credit" />
         <PriceLine label="Expiration rule" value={`${rewardConfig.expirationMonthsWithoutActivity} months without qualifying activity`} />
         <PriceLine label="Upcoming reminders" value={reminders.length ? `${reminders.length} expiration reminder${reminders.length === 1 ? '' : 's'} due` : 'None due today'} />
       </View>
@@ -1346,7 +2318,7 @@ function Rewards({
 
       <View style={styles.actionRow}>
         <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={() => addManualAdjustment(250, 'Concierge recovery credit')}>
-          <Text style={styles.ghostButtonText}>Admin +250</Text>
+          <Text style={styles.ghostButtonText}>Admin +250 Plume</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={runExpirationBatch}>
           <Text style={styles.ghostButtonText}>Run expiration</Text>
@@ -1367,7 +2339,7 @@ function Rewards({
                 {transaction.expiresAt ? ` / expires ${transaction.expiresAt}` : ''}
               </Text>
             </View>
-            <Text style={styles.rewardCost}>{transaction.direction === 'credit' ? '+' : '-'}{transaction.points}</Text>
+            <Text style={styles.rewardCost}>{transaction.direction === 'credit' ? '+' : '-'}{transaction.points} Plume Points</Text>
           </View>
         </View>
       ))}
@@ -1377,13 +2349,17 @@ function Rewards({
 
 function Bookings({
   bookings,
+  claimBooking,
   confirmBooking,
   reverseBooking,
+  scheduleBooking,
   setScreen,
 }: {
   bookings: Booking[];
+  claimBooking: (bookingId: string) => void;
   confirmBooking: (bookingId: string) => void;
   reverseBooking: (bookingId: string) => void;
+  scheduleBooking: (bookingId: string) => void;
   setScreen: (screen: Screen) => void;
 }) {
   return (
@@ -1391,13 +2367,13 @@ function Bookings({
       <PageIntro
         kicker="BOOKING ACTIVITY"
         title="Historical pricing is preserved."
-        body="Bookings snapshot the agreed price, reward redemption, vendor payment route, and FLAIRO revenue obligation."
+        body="Bookings snapshot the agreed price, Plume Point redemption, vendor payment route, and FLAIRO revenue obligation."
       />
 
       {bookings.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.cardTitle}>No bookings yet</Text>
-          <Text style={styles.bodyMuted}>Create a resident profile, open Home Care, apply points if eligible, and book Occupied Cleaning.</Text>
+          <Text style={styles.bodyMuted}>Create a resident profile, open Home Care, apply Plume Points if eligible, and book Occupied Cleaning.</Text>
           <TouchableOpacity style={styles.primaryButtonWide} onPress={() => setScreen('services')}>
             <Text style={styles.primaryButtonText}>Book Home Care</Text>
           </TouchableOpacity>
@@ -1406,9 +2382,11 @@ function Bookings({
         bookings.map((booking) => (
           <BookingCard
             booking={booking}
+            claimBooking={claimBooking}
             confirmBooking={confirmBooking}
             key={booking.id}
             reverseBooking={reverseBooking}
+            scheduleBooking={scheduleBooking}
           />
         ))
       )}
@@ -1425,8 +2403,10 @@ function Admin({
   rewardConfig,
   rewardSummary,
   rewardTransactions,
+  resetScheduleTimer,
   runExpirationBatch,
   setAdminTab,
+  surveys,
   updateRewardConfig,
 }: {
   addManualAdjustment: (pointsDelta: number, reason: string) => void;
@@ -1437,8 +2417,10 @@ function Admin({
   rewardConfig: RewardProgramConfig;
   rewardSummary: RewardAccountSummary;
   rewardTransactions: RewardLedgerEntry[];
+  resetScheduleTimer: (bookingId: string) => void;
   runExpirationBatch: () => void;
   setAdminTab: (tab: AdminTab) => void;
+  surveys: CustomerExperienceSurvey[];
   updateRewardConfig: (patch: Partial<RewardProgramConfig>) => void;
 }) {
   const grossServiceValue = bookings.reduce((sum, booking) => sum + booking.originalEligibleSubtotal, 0);
@@ -1464,10 +2446,17 @@ function Admin({
   const activeMembers = resident ? 1 : 0;
   const activePlusMembers = resident && isPlusEligible(resident.membershipStatus) ? 1 : 0;
   const repeatBookingRate = bookings.length > 1 ? '100%' : '0%';
+  const completedSurveys = surveys.filter((survey) => survey.status === 'Completed');
+  const flaggedSurveys = completedSurveys.filter((survey) => survey.flagged);
+  const pendingSurveys = surveys.filter((survey) => survey.status === 'Pending');
+  const averageCxScore = completedSurveys.length
+    ? (completedSurveys.reduce((sum, survey) => sum + (survey.rating ?? 0), 0) / completedSurveys.length).toFixed(1)
+    : 'No responses';
+  const providerExperience = buildProviderExperienceStats(surveys);
 
   const patchRewardConfig = (patch: Partial<RewardProgramConfig>) => updateRewardConfig(patch);
   const updateNumericSetting = (
-    key: 'availabilityWaitingDays' | 'expirationMonthsWithoutActivity' | 'redemptionMaxPercentOfEligibleSubtotal' | 'referralFeePercent',
+    key: 'availabilityWaitingDays' | 'expirationMonthsWithoutActivity' | 'redemptionMaxPercentOfEligibleSubtotal',
     delta: number,
   ) => {
     const next = Math.max(0, Math.round((rewardConfig[key] + delta) * 100) / 100);
@@ -1485,7 +2474,7 @@ function Admin({
     <View>
       <PageIntro
         kicker="FLAIRO ADMIN PORTAL"
-        title="Rewards, providers, settlement, and audit."
+        title="Plume Points, providers, settlement, and audit."
         body="Settings in this screen update the live resident wallet, checkout limits, service eligibility, and reporting cards."
       />
 
@@ -1508,17 +2497,18 @@ function Admin({
             <StatCard label="Bookings" value={bookings.length.toString()} detail="total requests" />
             <StatCard label="GSV" value={money(grossServiceValue)} detail="gross service value" />
             <StatCard label="FLAIRO" value={money(flairoRevenue)} detail="net referral revenue" />
+            <StatCard label="CX" value={averageCxScore} detail={`${flaggedSurveys.length} follow-up flags`} />
           </View>
           <View style={styles.infoPanel}>
             <Text style={styles.cardLabelGold}>REPORTING DASHBOARD</Text>
-            <PriceLine label="Active Rewards members" value={activeMembers.toString()} />
+            <PriceLine label="Active Plus members" value={activeMembers.toString()} />
             <PriceLine label="Active PLUS members" value={activePlusMembers.toString()} />
             <PriceLine label="Monthly membership revenue" value={money(membershipRevenue)} />
             <PriceLine label="Vendor revenue collected directly" value={money(vendorRevenue)} />
-            <PriceLine label="Outstanding points liability" value={formatCents(rewardSummary.outstandingLiabilityCents)} />
-            <PriceLine label="Pending points liability" value={formatCents(rewardSummary.pendingLiabilityCents)} />
+            <PriceLine label="Outstanding Plume Point liability" value={formatCents(rewardSummary.outstandingLiabilityCents)} />
+            <PriceLine label="Pending Plume Point liability" value={formatCents(rewardSummary.pendingLiabilityCents)} />
             <PriceLine label="Bookings by community" value={resident ? findCommunity(resident.communityId).name : 'None yet'} />
-            <PriceLine label="Drill-down source" value="Bookings, reward ledger, provider fee ledger" />
+            <PriceLine label="Drill-down source" value="Bookings, Plume Point ledger, provider fee ledger" />
           </View>
         </View>
       ) : null}
@@ -1528,7 +2518,7 @@ function Admin({
           {services.map((service) => (
             <AdminRow
               actionLabel={serviceRule(service.rewardCode, rewardConfig).active ? 'Deactivate' : 'Activate'}
-              detail={`${service.category} / ${service.duration} / bonus ${serviceRule(service.rewardCode, rewardConfig).freeCompletionBonus} free, ${serviceRule(service.rewardCode, rewardConfig).plusCompletionBonus} PLUS`}
+              detail={`${service.category} / ${service.duration} / Plus bonus ${serviceRule(service.rewardCode, rewardConfig).plusCompletionBonus} Plume Points`}
               key={service.id}
               onAction={() => toggleServiceRule(service.rewardCode)}
               title={service.title}
@@ -1553,10 +2543,10 @@ function Admin({
       {adminTab === 'Vendors' ? (
         <AdminSection title="Vendor management">
           {vendorAgreements.map((agreement) => (
-            <AdminRow
+            <ProviderAdminRow
+              agreement={agreement}
               key={agreement.id}
-              title={agreement.vendorName}
-              detail={`${agreement.paymentConnectionStatus} / Standard ${agreement.standardFlairoFeePercent}% / PLUS ${agreement.plusFlairoFeePercent}% / ${agreement.discountTreatment}`}
+              stat={providerExperience.find((item) => item.vendorName === agreement.vendorName)}
             />
           ))}
         </AdminSection>
@@ -1569,47 +2559,50 @@ function Admin({
           ) : (
             bookings.map((booking) => (
               <AdminRow
+                actionLabel={booking.bookingStatus === 'Claimed' ? 'Reset timer' : undefined}
                 key={booking.id}
+                onAction={booking.bookingStatus === 'Claimed' ? () => resetScheduleTimer(booking.id) : undefined}
                 title={`${booking.id} / ${booking.serviceTitle}`}
-                detail={`${booking.residentName} / ${booking.communityName} ${booking.unitNumber} / ${booking.bookingStatus} / ${booking.pointStatus} rewards / resident pays ${money(booking.finalResidentPayment)}`}
+                detail={`${booking.residentName} / ${booking.communityName} ${booking.unitNumber} / ${booking.bookingStatus} / ${booking.jobBoardStatus} / ${scheduleCountdown(booking)} / resident pays ${money(booking.finalResidentPayment)}`}
               />
             ))
           )}
         </AdminSection>
       ) : null}
 
-      {adminTab === 'Rewards' ? (
-        <AdminSection title="Reward program controls">
+      {adminTab === 'Plume Points' ? (
+        <AdminSection title="Plume Point controls">
           <View style={styles.infoPanel}>
             <Text style={styles.cardLabelGold}>CONFIGURABLE VALUES</Text>
             <ConfigLine label="Availability waiting period" value={`${rewardConfig.availabilityWaitingDays} days`} decrease={() => updateNumericSetting('availabilityWaitingDays', -1)} increase={() => updateNumericSetting('availabilityWaitingDays', 1)} />
             <ConfigLine label="Redemption cap" value={`${rewardConfig.redemptionMaxPercentOfEligibleSubtotal}% of eligible subtotal`} decrease={() => updateNumericSetting('redemptionMaxPercentOfEligibleSubtotal', -1)} increase={() => updateNumericSetting('redemptionMaxPercentOfEligibleSubtotal', 1)} />
             <ConfigLine label="Expiration period" value={`${rewardConfig.expirationMonthsWithoutActivity} months`} decrease={() => updateNumericSetting('expirationMonthsWithoutActivity', -1)} increase={() => updateNumericSetting('expirationMonthsWithoutActivity', 1)} />
-            <ConfigLine label="Provider referral fee" value={`${rewardConfig.referralFeePercent}%`} decrease={() => updateNumericSetting('referralFeePercent', -1)} increase={() => updateNumericSetting('referralFeePercent', 1)} />
-            <PriceLine label="Point value" value="100 pts = $1" />
-            <PriceLine label="Free threshold" value={`${rewardConfig.free.redemptionThresholdPoints} pts`} />
-            <PriceLine label="PLUS threshold" value={`${rewardConfig.plus.redemptionThresholdPoints} pts`} />
+            <PriceLine label="Provider referral fee" value="Set by individual provider agreement" />
+            <PriceLine label="Plume Point value" value="100 Plume Points = $1" />
+            <PriceLine label="Accrual eligibility" value="FLAIRO Plus members only" />
+            <PriceLine label="PLUS redemption threshold" value={`${rewardConfig.plus.redemptionThresholdPoints} Plume Points`} />
+            <PriceLine label="Expiration alert" value={`${rewardConfig.expirationReminderDays.join(', ')} days before expiration`} />
           </View>
 
           <View style={styles.actionRow}>
             <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={() => addManualAdjustment(250, 'Manual goodwill adjustment')}>
-              <Text style={styles.ghostButtonText}>Add 250 pts</Text>
+              <Text style={styles.ghostButtonText}>Add 250 Plume</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={() => addManualAdjustment(-150, 'Administrative correction')}>
-              <Text style={styles.ghostButtonText}>Remove 150 pts</Text>
+              <Text style={styles.ghostButtonText}>Expire 150 Plume</Text>
             </TouchableOpacity>
           </View>
           <TouchableOpacity style={styles.ghostButtonWide} onPress={runExpirationBatch}>
-            <Text style={styles.ghostButtonText}>Run point-expiration batch</Text>
+            <Text style={styles.ghostButtonText}>Run Plume expiration batch</Text>
           </TouchableOpacity>
 
           <View style={styles.infoPanel}>
-            <Text style={styles.cardLabelPink}>POINT STATUS TOTALS</Text>
-            <PriceLine label="Pending" value={rewardSummary.pendingPoints.toLocaleString()} />
-            <PriceLine label="Available" value={rewardSummary.availablePoints.toLocaleString()} />
-            <PriceLine label="Redeemed" value={rewardSummary.redeemedPoints.toLocaleString()} />
-            <PriceLine label="Reversed" value={rewardSummary.reversedPoints.toLocaleString()} />
-            <PriceLine label="Expired" value={rewardSummary.expiredPoints.toLocaleString()} />
+            <Text style={styles.cardLabelPink}>PLUME POINT STATUS TOTALS</Text>
+            <PriceLine label="Pending" value={`${rewardSummary.pendingPoints.toLocaleString()} Plume Points`} />
+            <PriceLine label="Available" value={`${rewardSummary.availablePoints.toLocaleString()} Plume Points`} />
+            <PriceLine label="Redeemed" value={`${rewardSummary.redeemedPoints.toLocaleString()} Plume Points`} />
+            <PriceLine label="Reversed" value={`${rewardSummary.reversedPoints.toLocaleString()} Plume Points`} />
+            <PriceLine label="Expired" value={`${rewardSummary.expiredPoints.toLocaleString()} Plume Points`} />
           </View>
         </AdminSection>
       ) : null}
@@ -1624,8 +2617,8 @@ function Admin({
                 <Text style={styles.cardLabelGold}>SETTLEMENT SUMMARY</Text>
                 <PriceLine label="Completed bookings" value={completedBookings.length.toString()} />
                 <PriceLine label="Eligible service revenue" value={money(grossServiceValue)} />
-                <PriceLine label="Gross 10% referral fees" value={money(grossReferralFees)} />
-                <PriceLine label="Reward credits applied" value={money(rewardCredits)} />
+                <PriceLine label="Gross vendor-specific referral fees" value={money(grossReferralFees)} />
+                <PriceLine label="Plume credits applied" value={money(rewardCredits)} />
                 <PriceLine label="Provider-funded discounts" value={money(providerFundedDiscounts)} />
                 <PriceLine label="FLAIRO-funded discounts" value={money(flairoFundedDiscounts)} />
                 <PriceLine label="Shared discounts" value={money(sharedDiscounts)} />
@@ -1637,10 +2630,60 @@ function Admin({
                 <AdminRow
                   key={booking.id}
                   title={`${booking.vendorName} owes FLAIRO ${money(booking.flairoRevenue)}`}
-                  detail={`${booking.id} / ${booking.bookingStatus} / gross fee ${money(booking.grossReferralFee)} / credit offset ${money(booking.creditOffset)} / ${booking.settlementStatus}`}
+                  detail={`${booking.id} / ${booking.bookingStatus} / ${booking.providerPreferredFeePercent}% fee / gross fee ${money(booking.grossReferralFee)} / ${scheduleCountdown(booking)} / ${booking.settlementStatus}`}
                 />
               ))}
+              <Text style={styles.sectionTitle}>Vendor board priority</Text>
+              {providerExperience.map((stat, index) => (
+                <ProviderPriorityRow key={stat.vendorName} position={index + 1} stat={stat} />
+              ))}
             </View>
+          )}
+        </AdminSection>
+      ) : null}
+
+      {adminTab === 'Experience' ? (
+        <AdminSection title="Customer Experience">
+          <View style={styles.infoPanel}>
+            <Text style={styles.cardLabelGold}>SURVEY PERFORMANCE</Text>
+            <PriceLine label="Average experience score" value={averageCxScore} />
+            <PriceLine label="Completed responses" value={completedSurveys.length.toString()} />
+            <PriceLine label="Pending surveys" value={pendingSurveys.length.toString()} />
+            <PriceLine label="Follow-up flags" value={flaggedSurveys.length.toString()} />
+            <PriceLine label="Email delivery rule" value="Completion creates one email form and one in-app prompt per booking" />
+          </View>
+
+          <Text style={styles.sectionTitle}>Customer follow-up queue</Text>
+          {flaggedSurveys.length === 0 ? (
+            <AdminRow title="No flagged responses" detail="1-2 star ratings and resident no-confidence answers will appear here for follow-up." />
+          ) : (
+            flaggedSurveys.map((survey) => (
+              <View style={styles.warningPanelInline} key={survey.id}>
+                <Text style={styles.cardLabelPink}>CUSTOMER EXPERIENCE FOLLOW-UP</Text>
+                <Text style={styles.cardTitle}>{survey.residentName} / {survey.serviceTitle}</Text>
+                <Text style={styles.bodyMuted}>
+                  {survey.vendorName} / {survey.ratingLabel} / {survey.vendorConfidence} / submitted {formatDateTimeLabel(survey.submittedAt)}
+                </Text>
+              </View>
+            ))
+          )}
+
+          <Text style={styles.sectionTitle}>Vendor scorecard</Text>
+          {providerExperience.map((stat, index) => (
+            <ProviderPriorityRow key={stat.vendorName} position={index + 1} stat={stat} />
+          ))}
+
+          <Text style={styles.sectionTitle}>Survey delivery</Text>
+          {surveys.length === 0 ? (
+            <AdminRow title="No surveys yet" detail="Mark a scheduled booking completed to trigger the resident modal and email survey." />
+          ) : (
+            surveys.map((survey) => (
+              <AdminRow
+                key={survey.id}
+                title={`${survey.id} / ${survey.status}`}
+                detail={`${survey.residentName} / ${survey.bookingId} / in-app ${survey.inAppStatus} / email ${survey.emailStatus} / ${survey.ratingLabel ?? 'waiting for response'}`}
+              />
+            ))
           )}
         </AdminSection>
       ) : null}
@@ -1649,17 +2692,17 @@ function Admin({
         <AdminSection title="Reports">
           <View style={styles.infoPanel}>
             <Text style={styles.cardLabelGold}>MEMBERSHIP</Text>
-            <PriceLine label="Rewards members" value={activeMembers.toString()} />
+            <PriceLine label="Resident profiles" value={activeMembers.toString()} />
             <PriceLine label="PLUS members" value={activePlusMembers.toString()} />
             <PriceLine label="PLUS enrollments" value={activePlusMembers.toString()} />
             <PriceLine label="PLUS cancellations/churn" value={resident?.membershipStatus === 'Cancelled' ? '1 / 100%' : '0 / 0%'} />
             <PriceLine label="Membership revenue" value={money(membershipRevenue)} />
           </View>
           <View style={styles.infoPanel}>
-            <Text style={styles.cardLabelPink}>REWARDS AND FINANCE</Text>
-            <PriceLine label="Points issued" value={rewardSummary.lifetimePointsEarned.toLocaleString()} />
-            <PriceLine label="Pending/redeemed/reversed/expired" value={`${rewardSummary.pendingPoints}/${rewardSummary.redeemedPoints}/${rewardSummary.reversedPoints}/${rewardSummary.expiredPoints}`} />
-            <PriceLine label="Outstanding liability" value={formatCents(rewardSummary.outstandingLiabilityCents)} />
+            <Text style={styles.cardLabelPink}>PLUME POINTS AND FINANCE</Text>
+            <PriceLine label="Plume Points issued" value={rewardSummary.lifetimePointsEarned.toLocaleString()} />
+            <PriceLine label="Pending/redeemed/reversed/expired" value={`${rewardSummary.pendingPoints}/${rewardSummary.redeemedPoints}/${rewardSummary.reversedPoints}/${rewardSummary.expiredPoints} Plume Points`} />
+            <PriceLine label="Plume Point liability" value={formatCents(rewardSummary.outstandingLiabilityCents)} />
             <PriceLine label="Service credits redeemed" value={formatCents(rewardSummary.lifetimeRewardsRedeemedCents)} />
             <PriceLine label="Gross service revenue" value={money(grossServiceValue)} />
             <PriceLine label="Gross referral fees" value={money(grossReferralFees)} />
@@ -1673,8 +2716,16 @@ function Admin({
             <PriceLine label="Recurring-service adoption" value={`${recurringBookings.length} booking${recurringBookings.length === 1 ? '' : 's'}`} />
             <PriceLine label="Most booked service" value={bookings[0]?.serviceTitle ?? 'None yet'} />
             <PriceLine label="Most redeemed service" value={bookings.find((booking) => booking.pointsRedeemed > 0)?.serviceTitle ?? 'None yet'} />
-            <PriceLine label="PLUS savings and extra points" value={`${money(plusSavings)} / ${rewardSummary.plusAdditionalPointsEarned.toLocaleString()} pts`} />
+            <PriceLine label="PLUS savings and extra Plume" value={`${money(plusSavings)} / ${rewardSummary.plusAdditionalPointsEarned.toLocaleString()} Plume Points`} />
             <PriceLine label="Filters" value="date, provider, service, resident, membership, community, city, state, booking status" />
+          </View>
+          <View style={styles.infoPanel}>
+            <Text style={styles.cardLabelPink}>CUSTOMER EXPERIENCE</Text>
+            <PriceLine label="Average survey rating" value={averageCxScore} />
+            <PriceLine label="Completed / pending surveys" value={`${completedSurveys.length} / ${pendingSurveys.length}`} />
+            <PriceLine label="Follow-up flags" value={flaggedSurveys.length.toString()} />
+            <PriceLine label="Vendor board ranking" value="Preferred vendors first, then highest CX average" />
+            <PriceLine label="Top vendor" value={providerExperience[0] ? `${providerExperience[0].vendorName} / ${providerExperience[0].averageRating.toFixed(1)}` : 'No vendor data'} />
           </View>
         </AdminSection>
       ) : null}
@@ -1697,7 +2748,7 @@ function Admin({
             <AdminRow
               key={entry.id}
               title={`${entry.id} / ${entry.status}`}
-              detail={`${entry.direction === 'credit' ? '+' : '-'}${entry.points} pts / ${entry.type} / ${entry.reason}`}
+              detail={`${entry.direction === 'credit' ? '+' : '-'}${entry.points} Plume Points / ${entry.type} / ${entry.reason}`}
             />
           ))}
         </AdminSection>
@@ -1736,7 +2787,7 @@ function Profile({
     <View>
       <PageIntro
         kicker="RESIDENT ACCOUNT"
-        title="Home, services, Plus, rewards, and payments."
+        title="Home, services, Plus, Plume Points, and payments."
         body="Residents can manage contact and unit details, subject to admin validation rules."
       />
       <View style={styles.profileCard}>
@@ -1762,13 +2813,13 @@ function Profile({
           ))}
         </View>
         <Text style={styles.bodyMuted}>
-          PLUS is $5 monthly. Canceling keeps previously earned points, while future bookings return to the free earning rate.
+          PLUS is $5 monthly. Canceling keeps previously earned Plume Points, while future bookings stop earning new Plume Points until Plus is active again.
         </Text>
       </View>
 
       {[
         ['My Home', `${community.name} / ${resident.unit.bedrooms}BR / ${resident.unit.bathrooms}BA / ${resident.unit.verificationStatus}`],
-        ['My Rewards', `${points.toLocaleString()} available points / ${rewardSummary.pendingPoints.toLocaleString()} pending / ${formatCents(rewardSummary.outstandingLiabilityCents)} value`],
+        ['My Plume Points', `${points.toLocaleString()} available Plume Points / ${rewardSummary.pendingPoints.toLocaleString()} pending / ${formatCents(rewardSummary.outstandingLiabilityCents)} value`],
         ['My Payments', 'Resident pays vendor; receipts and refunds will attach to bookings.'],
         ['Support', 'Concierge chat and service preferences.'],
       ].map(([title, subtitle]) => (
@@ -1786,12 +2837,16 @@ function Profile({
 
 function BookingCard({
   booking,
+  claimBooking,
   confirmBooking,
   reverseBooking,
+  scheduleBooking,
 }: {
   booking: Booking;
+  claimBooking: (bookingId: string) => void;
   confirmBooking: (bookingId: string) => void;
   reverseBooking: (bookingId: string) => void;
+  scheduleBooking: (bookingId: string) => void;
 }) {
   return (
     <View style={styles.bookingCard}>
@@ -1809,15 +2864,25 @@ function BookingCard({
         <PriceLine label="Original eligible subtotal" value={money(booking.originalEligibleSubtotal)} />
         <PriceLine label="Standard" value={money(booking.standardPrice)} />
         <PriceLine label="PLUS" value={money(booking.plusPrice)} />
-        <PriceLine label="Discount" value={`-${money(booking.discount)} / ${booking.pointsRedeemed} pts`} />
+        <PriceLine label="Discount" value={`-${money(booking.discount)} / ${booking.pointsRedeemed} Plume Points`} />
         <PriceLine label="Resident pays vendor" value={money(booking.finalResidentPayment)} emphasized />
-        <PriceLine label="Gross 10% referral fee" value={money(booking.grossReferralFee)} />
+        <PriceLine label={`Gross ${booking.providerPreferredFeePercent}% referral fee`} value={money(booking.grossReferralFee)} />
         <PriceLine label="Credit offset" value={money(booking.creditOffset)} />
         <PriceLine label="Vendor owes FLAIRO" value={money(booking.flairoRevenue)} />
         <PriceLine label="Provider retains after fee" value={money(booking.providerRetainedAfterReferral)} />
-        <PriceLine label="Reward status" value={`${booking.pointStatus} / ${booking.earnedTotalPoints.toLocaleString()} pts`} />
+        <PriceLine label="Plume Point status" value={`${booking.pointStatus} / ${booking.earnedTotalPoints.toLocaleString()} Plume Points`} />
         <PriceLine label="Settlement" value={booking.settlementStatus} />
+        <PriceLine label="Job board" value={`${booking.jobBoardStatus}${booking.providerPreferred ? ' / preferred first look' : ''}`} />
+        <PriceLine label="Provider CX" value={`${booking.providerExperienceScoreAtBooking.toFixed(1)} avg / ${booking.providerPreferredFeePercent}% FLAIRO fee`} />
+        {booking.vendorClaimedAt ? <PriceLine label="Accepted" value={formatDateTimeLabel(booking.vendorClaimedAt)} /> : null}
+        {booking.scheduleDueAt ? <PriceLine label="Schedule due" value={formatDateTimeLabel(booking.scheduleDueAt)} /> : null}
       </View>
+      {booking.bookingStatus === 'Claimed' ? (
+        <View style={isScheduleOverdue(booking) ? styles.warningPanelInline : styles.timerPanel}>
+          <Text style={styles.cardLabelGold}>VENDOR SCHEDULING TIMER</Text>
+          <Text style={styles.bodyMuted}>{scheduleCountdown(booking)}</Text>
+        </View>
+      ) : null}
       {booking.reviewFlags.length > 0 ? (
         <View style={styles.warningPanelInline}>
           {booking.reviewFlags.map((flag) => (
@@ -1826,15 +2891,25 @@ function BookingCard({
         </View>
       ) : null}
       <View style={styles.actionRow}>
+        {booking.bookingStatus === 'Requested' ? (
+          <TouchableOpacity onPress={() => claimBooking(booking.id)} style={styles.ghostButtonWideHalf}>
+            <Text style={styles.ghostButtonText}>Vendor accept work</Text>
+          </TouchableOpacity>
+        ) : null}
+        {booking.bookingStatus === 'Claimed' ? (
+          <TouchableOpacity onPress={() => scheduleBooking(booking.id)} style={styles.ghostButtonWideHalf}>
+            <Text style={styles.ghostButtonText}>Enter schedule</Text>
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity
-          disabled={booking.bookingStatus === 'Completed' || booking.bookingStatus === 'Refunded'}
+          disabled={booking.bookingStatus !== 'Scheduled'}
           onPress={() => confirmBooking(booking.id)}
           style={[
             styles.ghostButtonWideHalf,
-            (booking.bookingStatus === 'Completed' || booking.bookingStatus === 'Refunded') && styles.disabledButton,
+            booking.bookingStatus !== 'Scheduled' && styles.disabledButton,
           ]}
         >
-          <Text style={styles.ghostButtonText}>Confirm done</Text>
+          <Text style={styles.ghostButtonText}>Mark completed</Text>
         </TouchableOpacity>
         <TouchableOpacity
           disabled={booking.bookingStatus === 'Refunded'}
@@ -1845,6 +2920,108 @@ function BookingCard({
         </TouchableOpacity>
       </View>
     </View>
+  );
+}
+
+function CustomerExperienceSurveyModal({
+  onClose,
+  onSubmit,
+  survey,
+  thankYou,
+}: {
+  onClose: () => void;
+  onSubmit: (surveyId: string, rating: StarRating, vendorConfidence: VendorConfidence, submittedBy: SurveyChannel) => void;
+  survey: CustomerExperienceSurvey | null;
+  thankYou: boolean;
+}) {
+  const [rating, setRating] = useState<StarRating | null>(null);
+  const [vendorConfidence, setVendorConfidence] = useState<VendorConfidence | null>(null);
+
+  useEffect(() => {
+    setRating(null);
+    setVendorConfidence(null);
+  }, [survey?.id]);
+
+  if (!survey) return null;
+
+  const ready = Boolean(rating && vendorConfidence);
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={Boolean(survey)}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.surveyModal}>
+          {thankYou ? (
+            <View>
+              <Image resizeMode="cover" source={goldIcon} style={styles.surveyIcon} />
+              <Text style={styles.cardLabelGold}>THANK YOU</Text>
+              <Text style={styles.panelTitle}>Thank you for sharing your experience with us.</Text>
+              <Text style={styles.bodyMuted}>
+                Every response helps Flairo take better care of our residents and make the next experience even better.
+              </Text>
+              <TouchableOpacity style={styles.primaryButtonWide} onPress={onClose}>
+                <Text style={styles.primaryButtonText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View>
+              <Image resizeMode="cover" source={goldIcon} style={styles.surveyIcon} />
+              <Text style={styles.cardLabelGold}>FLAIRO CARE CHECK-IN</Text>
+              <Text style={styles.panelTitle}>Your experience matters here.</Text>
+              <Text style={styles.bodyMuted}>
+                Thanks for trusting Flairo with {survey.serviceTitle}. This is intentionally quick because your time matters too.
+              </Text>
+
+              <Text style={styles.surveyQuestion}>
+                How did we do making your experience feel easy, cared for, and worth coming back to?
+              </Text>
+              <View style={styles.surveyOptionStack}>
+                {ratingOptions.map((option) => (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    key={option.score}
+                    onPress={() => setRating(option.score)}
+                    style={[styles.surveyOption, rating === option.score && styles.surveyOptionActive]}
+                  >
+	                    <Text style={[styles.surveyOptionText, rating === option.score && styles.surveyOptionTextActive]}>
+	                      {starsForRating(option.score)}  {option.label}
+	                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.surveyQuestion}>
+                If you needed this service again, would you feel good about having this vendor take care of you?
+              </Text>
+              <View style={styles.surveyOptionStack}>
+                {vendorConfidenceOptions.map((option) => (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    key={option}
+                    onPress={() => setVendorConfidence(option)}
+                    style={[styles.surveyOption, vendorConfidence === option && styles.surveyOptionActive]}
+                  >
+                    <Text style={[styles.surveyOptionText, vendorConfidence === option && styles.surveyOptionTextActive]}>
+                      {option}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <TouchableOpacity
+                disabled={!ready}
+                onPress={() => rating && vendorConfidence && onSubmit(survey.id, rating, vendorConfidence, 'In-app')}
+                style={[styles.primaryButtonWide, !ready && styles.disabledButton]}
+              >
+                <Text style={styles.primaryButtonText}>Share experience</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.ghostButtonWide} onPress={onClose}>
+                <Text style={styles.ghostButtonText}>Ask me later</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -2031,6 +3208,72 @@ function AdminRow({
   );
 }
 
+function ProviderAdminRow({
+  agreement,
+  stat,
+}: {
+  agreement: VendorAgreement;
+  stat?: ProviderExperienceStat;
+}) {
+  const rating = stat?.averageRating ?? agreement.customerExperienceRating;
+  return (
+    <View style={styles.adminRow}>
+      <View style={styles.rowBetweenTop}>
+        <View style={styles.adminRowCopy}>
+          <View style={styles.preferredProviderLine}>
+            {agreement.preferred ? <Image resizeMode="cover" source={goldIcon} style={styles.inlineFlamingo} /> : null}
+            <Text style={agreement.preferred ? styles.glitterProviderTitle : styles.cardTitle}>
+              {agreement.vendorName}
+            </Text>
+          </View>
+          <Text style={styles.bodyMuted}>
+            {agreement.paymentConnectionStatus} / Standard {agreement.standardFlairoFeePercent}% / PLUS {agreement.plusFlairoFeePercent}% / Preferred {agreement.preferred ? `${agreement.preferredFlairoFeePercent}%` : 'not active'}
+          </Text>
+          <Text style={styles.bodyMuted}>
+            Eligible: {agreement.serviceEligibility.join(', ')} / Cities: {agreement.serviceCities.join(', ')} / ZIPs: {agreement.serviceZipCodes.join(', ')}
+          </Text>
+          <Text style={styles.bodyMuted}>
+            CX {rating.toFixed(1)} / {stat?.completedResponses ?? 0} response{stat?.completedResponses === 1 ? '' : 's'} / {stat?.flaggedResponses ?? 0} follow-up flags
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function ProviderPriorityRow({
+  position,
+  stat,
+}: {
+  position: number;
+  stat: ProviderExperienceStat;
+}) {
+  const confidentPercent = stat.completedResponses
+    ? Math.round((stat.confidentResponses / stat.completedResponses) * 100)
+    : 0;
+
+  return (
+    <View style={styles.adminRow}>
+      <View style={styles.rowBetweenTop}>
+        <View style={styles.adminRowCopy}>
+          <View style={styles.preferredProviderLine}>
+            {stat.preferred ? <Image resizeMode="cover" source={goldIcon} style={styles.inlineFlamingo} /> : null}
+            <Text style={stat.preferred ? styles.glitterProviderTitle : styles.cardTitle}>
+              {position}. {stat.vendorName}
+            </Text>
+          </View>
+          <Text style={styles.bodyMuted}>
+            {stat.preferred ? 'Preferred first-hour visibility' : 'Standard board visibility'} / CX {stat.averageRating.toFixed(1)} / {confidentPercent}% would happily use again
+          </Text>
+          <Text style={styles.bodyMuted}>
+            Board priority score {stat.boardPriority.toFixed(1)} / {stat.flaggedResponses} follow-up flag{stat.flaggedResponses === 1 ? '' : 's'}
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 const colors = {
   matte: '#0D0D0F',
   charcoal: '#151516',
@@ -2046,6 +3289,17 @@ const colors = {
   goldSoft: '#F0D58A',
   border: '#3B3332',
 };
+
+const plumeFeatherPositions = [
+  { left: 88, top: 4, transform: [{ rotate: '8deg' }] },
+  { right: 30, top: 18, transform: [{ rotate: '48deg' }] },
+  { right: 8, top: 58, transform: [{ rotate: '92deg' }] },
+  { bottom: 18, right: 28, transform: [{ rotate: '132deg' }] },
+  { bottom: 4, left: 88, transform: [{ rotate: '176deg' }] },
+  { bottom: 18, left: 28, transform: [{ rotate: '224deg' }] },
+  { left: 8, top: 58, transform: [{ rotate: '268deg' }] },
+  { left: 30, top: 18, transform: [{ rotate: '312deg' }] },
+];
 
 const styles = StyleSheet.create({
   safe: { backgroundColor: colors.matte, flex: 1 },
@@ -2079,6 +3333,47 @@ const styles = StyleSheet.create({
   pointsPillLabel: { color: colors.goldSoft, fontSize: 10, fontWeight: '900', marginTop: 1 },
   pointsPillText: { color: colors.ivory, fontSize: 15, fontWeight: '900' },
   scroll: { paddingBottom: 116, paddingHorizontal: 18 },
+  accessShell: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 18,
+  },
+  accessScroll: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    padding: 18,
+  },
+  accessCard: {
+    backgroundColor: colors.charcoal,
+    borderColor: colors.gold,
+    borderRadius: 8,
+    borderWidth: 1,
+    overflow: 'hidden',
+    padding: 18,
+  },
+  accessLogo: {
+    alignSelf: 'flex-start',
+    height: 118,
+    marginBottom: 12,
+    width: '100%',
+  },
+  accessIntentRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 18,
+  },
+  accessIntentButton: {
+    backgroundColor: colors.charcoalLift,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexGrow: 1,
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
   heroPanel: {
     backgroundColor: colors.charcoal,
     borderColor: colors.border,
@@ -2145,7 +3440,7 @@ const styles = StyleSheet.create({
   ghostButtonSelected: { backgroundColor: colors.taupe, borderColor: colors.pink },
   ghostButtonText: { color: colors.ivory, fontSize: 14, fontWeight: '900', textAlign: 'center' },
   disabledButton: { opacity: 0.45 },
-  actionRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  actionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 14 },
   statGrid: { flexDirection: 'row', gap: 9, marginTop: 12 },
   statCard: {
     backgroundColor: colors.charcoalLift,
@@ -2183,6 +3478,14 @@ const styles = StyleSheet.create({
     marginTop: 12,
     padding: 12,
   },
+  timerPanel: {
+    backgroundColor: '#221F18',
+    borderColor: colors.gold,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginTop: 12,
+    padding: 12,
+  },
   warningText: { color: colors.ivoryMuted, fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 4 },
   cardLabel: { color: colors.ash, fontSize: 11, fontWeight: '900', letterSpacing: 0 },
   cardLabelGold: { color: colors.goldSoft, fontSize: 11, fontWeight: '900', letterSpacing: 0 },
@@ -2214,6 +3517,7 @@ const styles = StyleSheet.create({
   sectionHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginTop: 26 },
   sectionTitle: { color: colors.ivory, fontSize: 20, fontWeight: '900', marginTop: 24 },
   sectionLink: { color: colors.pink, fontSize: 13, fontWeight: '900' },
+  textButton: { alignItems: 'center', marginTop: 16, minHeight: 28 },
   listItem: {
     alignItems: 'center',
     backgroundColor: colors.charcoalLift,
@@ -2382,6 +3686,29 @@ const styles = StyleSheet.create({
   serviceMetaRow: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 },
   metaText: { color: colors.ivory, fontSize: 13, fontWeight: '800' },
   pointsEarn: { color: colors.pink, fontSize: 13, fontWeight: '900' },
+  preferredProviderLine: { alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  inlineFlamingo: { borderColor: colors.gold, borderRadius: 6, borderWidth: 1, height: 26, width: 22 },
+  providerText: { color: colors.ivoryMuted, flexShrink: 1, fontSize: 12, fontWeight: '800', lineHeight: 17 },
+  glitterProviderText: {
+    color: colors.goldSoft,
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 17,
+    textShadowColor: colors.pink,
+    textShadowOffset: { height: 0, width: 0 },
+    textShadowRadius: 6,
+  },
+  glitterProviderTitle: {
+    color: colors.goldSoft,
+    flexShrink: 1,
+    fontSize: 17,
+    fontWeight: '900',
+    lineHeight: 22,
+    textShadowColor: colors.pink,
+    textShadowOffset: { height: 0, width: 0 },
+    textShadowRadius: 7,
+  },
   walletHero: {
     alignItems: 'center',
     backgroundColor: colors.charcoal,
@@ -2395,6 +3722,66 @@ const styles = StyleSheet.create({
   walletIcon: { borderColor: colors.gold, borderRadius: 8, borderWidth: 1, height: 96, marginRight: 16, width: 78 },
   walletCopy: { flex: 1 },
   walletNumber: { color: colors.ivory, fontSize: 44, fontWeight: '900', marginTop: 4 },
+  plumeDisplay: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    height: 132,
+    justifyContent: 'center',
+    marginTop: 8,
+    minWidth: 190,
+    paddingHorizontal: 16,
+  },
+  plumeWreath: {
+    height: 126,
+    left: 0,
+    position: 'absolute',
+    top: 0,
+    width: 190,
+  },
+  plumeFeather: {
+    backgroundColor: colors.goldSoft,
+    borderBottomLeftRadius: 10,
+    borderBottomRightRadius: 2,
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 12,
+    height: 22,
+    opacity: 0.82,
+    position: 'absolute',
+    width: 8,
+  },
+  plumeNumber: {
+    fontSize: 50,
+    fontWeight: '900',
+    letterSpacing: 0,
+    lineHeight: 56,
+    textAlign: 'center',
+  },
+  plumeNumberWhite: {
+    color: colors.ivory,
+    textShadowColor: '#FFFFFF',
+    textShadowOffset: { height: 0, width: 0 },
+    textShadowRadius: 5,
+  },
+  plumeNumberPink: {
+    color: colors.pink,
+    textShadowColor: colors.goldSoft,
+    textShadowOffset: { height: 0, width: 0 },
+    textShadowRadius: 8,
+  },
+  plumeNumberGold: {
+    color: colors.goldSoft,
+    textShadowColor: colors.pink,
+    textShadowOffset: { height: 0, width: 0 },
+    textShadowRadius: 10,
+  },
+  plumeValue: {
+    color: colors.ivoryMuted,
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 17,
+    marginTop: 3,
+    textAlign: 'center',
+  },
   rewardCard: {
     backgroundColor: colors.charcoalLift,
     borderColor: colors.border,
@@ -2432,6 +3819,39 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   dateBadgeText: { color: colors.ivory, fontSize: 11, fontWeight: '900', lineHeight: 15, textAlign: 'center' },
+  modalBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(13, 13, 15, 0.84)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 18,
+  },
+  surveyModal: {
+    backgroundColor: colors.charcoal,
+    borderColor: colors.gold,
+    borderRadius: 8,
+    borderWidth: 1,
+    maxWidth: 520,
+    padding: 18,
+    width: '100%',
+  },
+  surveyIcon: { borderColor: colors.gold, borderRadius: 8, borderWidth: 1, height: 58, marginBottom: 12, width: 46 },
+  surveyQuestion: { color: colors.ivory, fontSize: 15, fontWeight: '900', lineHeight: 21, marginTop: 18 },
+  surveyOptionStack: { gap: 8, marginTop: 10 },
+  surveyOption: {
+    backgroundColor: colors.charcoalLift,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
+  surveyOptionActive: {
+    backgroundColor: colors.pink,
+    borderColor: colors.pink,
+  },
+  surveyOptionText: { color: colors.ivoryMuted, fontSize: 13, fontWeight: '800', lineHeight: 18 },
+  surveyOptionTextActive: { color: colors.matte },
   adminRow: {
     backgroundColor: colors.charcoalLift,
     borderColor: colors.border,

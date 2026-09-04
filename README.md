@@ -9,15 +9,15 @@ Flairo is a resident concierge and benefits marketplace for renters.
 - Home Care category with Occupied Cleaning as the priority booking flow
 - Bedroom/bathroom-driven Standard and FLAIRO PLUS pricing
 - Membership-status validation before PLUS pricing is applied
-- FLAIRO Rewards ledger with pending, available, redeemed, reversed, and expired point statuses
-- Free and PLUS earning rules: 1x / 2x base points, service-completion bonuses, recurring milestones, and redemption thresholds
-- Checkout reward-credit math with 100 pts = $1, 10% subtotal redemption cap, provider payment, gross referral fee, credit offset, and net FLAIRO fee
+- FLAIRO Plume Points ledger with pending, available, redeemed, reversed, and expired point statuses
+- PLUS earning rules with 2x base points, service-completion bonuses, recurring milestones, and redemption thresholds
+- Checkout Plume Point credit math with 100 points = $1, 10% subtotal redemption cap, provider payment, gross referral fee, credit offset, and net FLAIRO fee
 - Booking/request history with historical price snapshots
 - Vendor payment routing model where the resident pays the vendor
 - Provider reporting for completed bookings, eligible revenue, 10% referral fees, reward credits, discount funding, and settlement status
 - Configurable vendor agreement, PLUS pricing, reward rules, expiration, and FLAIRO revenue obligation model
-- Admin portal for services, pricing, vendors, bookings, rewards, provider settlement, reports, and audit trail
-- Supabase migration blueprint for rewards, memberships, bookings, provider fees, settlements, adjustments, notifications, risk flags, and RLS policies
+- Admin portal for services, pricing, vendors, bookings, Plume Points, provider settlement, customer experience, reports, and audit trail
+- Supabase migration blueprint for Plume Points, memberships, bookings, provider fees, settlements, adjustments, customer experience surveys, notifications, risk flags, and RLS policies
 
 ## Brand direction
 - Matte charcoal mobile shell with flamingo pink, dusty pink, gold accent, and warm ivory
@@ -37,7 +37,7 @@ Flairo is a resident concierge and benefits marketplace for renters.
 2. `npm install`
 3. `npx expo start`
 
-## Test the rewards workflows
+## Test the Plume Points workflows
 
 Run the app checks:
 
@@ -45,7 +45,7 @@ Run the app checks:
 npx tsc --noEmit
 ```
 
-Run the rewards workflow self-test:
+Run the Plume Points workflow self-test:
 
 ```sh
 npx tsc --target ES2020 --module commonjs --outDir /tmp/flairo_rewards_test src/rewardsSystem.ts src/rewardsSystem.selftest.ts --esModuleInterop --skipLibCheck --strict
@@ -53,8 +53,8 @@ node /tmp/flairo_rewards_test/rewardsSystem.selftest.js
 ```
 
 In Expo Go, create or use the default resident profile, open Care, book a service,
-confirm completion from Activity, apply reward credits after reaching threshold,
-and use Admin -> Rewards/Provider/Reports/Audit to inspect the resulting ledger
+confirm completion from Activity, apply Plume Point credits after reaching threshold,
+and use Admin -> Plume Points/Provider/Experience/Reports/Audit to inspect the resulting ledger
 and settlement calculations.
 
 The current prototype is still self-contained in `App.tsx` for fast iteration,

@@ -45,7 +45,7 @@ config.serviceRules.forEach((rule) => {
 
   expectEqual(`${rule.code} free bonus`, free.completionBonusPoints, rule.freeCompletionBonus);
   expectEqual(`${rule.code} PLUS bonus`, plus.completionBonusPoints, rule.plusCompletionBonus);
-  expectEqual(`${rule.code} free total`, free.totalPoints, 200 + rule.freeCompletionBonus);
+  expectEqual(`${rule.code} free total`, free.totalPoints, 0);
   expectEqual(`${rule.code} PLUS total`, plus.totalPoints, 400 + rule.plusCompletionBonus);
 });
 
@@ -55,7 +55,7 @@ const freeHousekeeping = calculateEarnedPoints({
   membershipLevel: 'free',
   serviceCode: 'recurring_housekeeping',
 });
-expectEqual('free housekeeping example', freeHousekeeping.totalPoints, 250);
+expectEqual('free resident does not earn Plume Points', freeHousekeeping.totalPoints, 0);
 
 const plusHousekeeping = calculateEarnedPoints({
   config,
@@ -64,7 +64,7 @@ const plusHousekeeping = calculateEarnedPoints({
   serviceCode: 'recurring_housekeeping',
 });
 expectEqual('PLUS housekeeping example', plusHousekeeping.totalPoints, 500);
-expectEqual('PLUS extra points retained as ledger metadata', plusHousekeeping.plusAdditionalPoints, 250);
+expectEqual('PLUS Plume Points retained as ledger metadata', plusHousekeeping.plusAdditionalPoints, 500);
 
 expectEqual('Active status earns as PLUS', membershipLevelFromStatus('Active'), 'plus');
 expectEqual('Cancelled status reverts future earning', membershipLevelFromStatus('Cancelled'), 'free');
@@ -105,7 +105,7 @@ ledger = [launchBonus, ...ledger];
 const quote = calculateCheckoutQuote({
   availablePoints: summarizeRewardAccount(ledger, config).availablePoints,
   config,
-  membershipLevel: 'free',
+  membershipLevel: 'plus',
   originalEligibleSubtotalCents: cents(200),
   requestedPoints: 1000,
   selectedServicePriceCents: cents(200),
@@ -157,15 +157,15 @@ const expiring: RewardLedgerEntry = {
   points: 300,
   createdAt: '2026-02-26',
   availableAt: '2026-02-26',
-  expiresAt: '2026-10-25',
+  expiresAt: '2026-09-02',
 };
-expectEqual('60-day expiration reminder detected', expirationReminderEntries({
+expectEqual('7-day expiration reminder detected', expirationReminderEntries({
   entries: [expiring],
   config,
   today: '2026-08-26',
 }).length, 1);
 expectEqual('expiration creates debit entry', createExpirationEntries({
-  createdAt: '2026-10-26',
+  createdAt: '2026-09-03',
   entries: [expiring],
 }).length, 1);
 
@@ -184,7 +184,7 @@ expectTrue('negative balance is allowed after reversal', summarizeRewardAccount(
 const cappedQuote = calculateCheckoutQuote({
   availablePoints: 400,
   config,
-  membershipLevel: 'free',
+  membershipLevel: 'plus',
   originalEligibleSubtotalCents: cents(200),
   requestedPoints: 5000,
   selectedServicePriceCents: cents(200),
@@ -199,4 +199,4 @@ expectTrue('fraud controls flag ineligible service', flags.some((flag) => flag.c
 expectTrue('fraud controls flag excessive redemption', flags.some((flag) => flag.code === 'redemption_capped'));
 expectTrue('fraud controls block duplicate completion', flags.some((flag) => flag.code === 'duplicate_completion'));
 
-console.log('FLAIRO rewards self-test passed: 12 workflow groups verified.');
+console.log('FLAIRO Plume Points self-test passed: 12 workflow groups verified.');
