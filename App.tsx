@@ -45,7 +45,6 @@ import {
   type RewardRiskFlag,
 } from './src/rewardsSystem';
 import {
-  claimFlairoAppUser,
   checkFlairoSupabaseConnection,
   getCurrentFlairoAppUser,
   hasSupabaseConfig,
@@ -808,22 +807,16 @@ export default function App() {
 
     if (current.data) {
       setAppUser(current.data);
+      setAuthMessage(null);
       return current.data;
-    }
-
-    const claimed = await claimFlairoAppUser();
-
-    if (claimed.data) {
-      setAppUser(claimed.data);
-      return claimed.data;
     }
 
     setAppUser(null);
 
-    if (claimed.error) {
-      setAuthMessage('You are signed in, but this email is not connected to an active FLAIRO profile yet.');
-    } else if (current.error) {
+    if (current.error) {
       setAuthMessage(current.error.message);
+    } else {
+      setAuthMessage('You are signed in, but this email is not connected to an active FLAIRO resident, vendor, or admin profile yet.');
     }
 
     return null;
