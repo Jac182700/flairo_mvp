@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Flairo",
+    "slug": "flairo",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0D0D0F",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0D0D0F"
+      }
+    },
+    "splash": {
+      "backgroundColor": "#0D0D0F"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "5da3679a-b2e5-49ec-b36c-64ed60529daf"
+      }
+    },
+    "owner": "rise-a-real-estate-company",
+    "plugins": [
+      "expo-sqlite"
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Expo and React Native local state
+.expo/
+.expo-shared/
+dist/
+web-build/
+flairo-expo*.png
+flairo-expo*.svg
+flairo-phase1-qr.png
+flairo_mvp_emergent_import.zip
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Native/build artifacts
+android/
+ios/
+build/
+*.ipa
+*.apk
+*.aab
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# macOS
+.DS_Store
