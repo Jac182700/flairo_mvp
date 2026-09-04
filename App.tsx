@@ -55,7 +55,7 @@ import {
   type FlairoConnectionHealth,
 } from './lib/supabase';
 
-type Screen = 'home' | 'register' | 'services' | 'rewards' | 'bookings' | 'admin' | 'profile';
+type Screen = 'home' | 'register' | 'services' | 'rewards' | 'bookings' | 'vendor' | 'admin' | 'profile';
 type AccessIntent = 'resident' | 'vendor' | 'admin';
 type AuthUser = { id: string; email?: string | null };
 type Category = 'Home Care' | 'Move-out' | 'Moving' | 'Pet Care' | 'Perks';
@@ -64,6 +64,7 @@ type MembershipStatus = 'Active' | 'Trial' | 'Past Due' | 'Cancelled' | 'Expired
 type VerificationStatus = 'Unverified' | 'Resident Self-Verified' | 'Property Verified' | 'Admin Verified';
 type DiscountTreatment = 'FLAIRO absorbs discount' | 'Vendor absorbs discount' | 'Shared discount' | 'Discount offsets FLAIRO commission' | 'Promotional subsidy';
 type AdminTab = 'Dashboard' | 'Services' | 'Pricing' | 'Vendors' | 'Bookings' | 'Plume Points' | 'Provider' | 'Experience' | 'Reports' | 'Audit';
+type VendorTab = 'Available' | 'Claimed' | 'Payments' | 'Services' | 'Pricing';
 type BookingStatus = 'Requested' | 'Claimed' | 'Scheduled' | 'Completed' | 'Refunded';
 type JobBoardStatus = 'Preferred preview' | 'Available to vendor board' | 'Claimed' | 'Scheduled' | 'Completed' | 'Released';
 type StarRating = 1 | 2 | 3 | 4 | 5;
@@ -197,6 +198,7 @@ type Booking = {
   scheduledAt?: string;
   scheduleTimerResets: number;
   discountTreatment: DiscountTreatment;
+  vendorAdjustmentNote?: string;
 };
 
 type CustomerExperienceSurvey = {
@@ -507,7 +509,8 @@ const services: Service[] = [
 ];
 
 const filters: Filter[] = ['All', 'Home Care', 'Move-out', 'Moving', 'Pet Care', 'Perks'];
-const adminTabs: AdminTab[] = ['Dashboard', 'Services', 'Pricing', 'Vendors', 'Bookings', 'Plume Points', 'Provider', 'Experience', 'Reports', 'Audit'];
+const adminTabs: AdminTab[] = ['Dashboard', 'Services', 'Pricing', 'Vendors', 'Bookings', 'Plume Points', 'Audit'];
+const vendorTabs: VendorTab[] = ['Available', 'Claimed', 'Payments', 'Services', 'Pricing'];
 
 const navItems: Array<{ key: Screen; label: string }> = [
   { key: 'home', label: 'Home' },
@@ -515,6 +518,7 @@ const navItems: Array<{ key: Screen; label: string }> = [
   { key: 'services', label: 'Care' },
   { key: 'rewards', label: 'Wallet' },
   { key: 'bookings', label: 'Activity' },
+  { key: 'vendor', label: 'Vendor' },
   { key: 'admin', label: 'Admin' },
 ];
 
@@ -552,6 +556,12 @@ const vendorConfidenceOptions: VendorConfidence[] = [
 ];
 
 const money = (value: number) => `$${value.toFixed(0)}`;
+const parseEditableMoney = (value: string, fallback: number) => {
+  const cleaned = value.replace(/[^0-9.]/g, '');
+  if (!cleaned) return fallback;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 const unitKey = (bedrooms: number, bathrooms: number) => `${bedrooms}-${bathrooms}`;
 const isPlusEligible = (status: MembershipStatus) => status === 'Active' || status === 'Trial';
 const starsForRating = (score: StarRating) => `${'★'.repeat(score)}${'☆'.repeat(5 - score)}`;
@@ -692,6 +702,14 @@ function getPricing(service: Service, resident: ResidentProfile | null) {
   };
 }
 
+function getBaseServicePricing(service: Service) {
+  const firstTier = service.pricingTiers?.[0];
+  const standardPrice = service.standardPrice ?? firstTier?.standardPrice ?? 0;
+  const plusPrice = service.plusPrice ?? firstTier?.plusPrice ?? standardPrice;
+
+  return { plusPrice, standardPrice };
+}
+
 function createSettlementBooking({
   checkout,
   completedRecurringCountIncludingThis,
@@ -778,6 +796,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [resident, setResident] = useState<ResidentProfile | null>(null);
   const [rewardConfig, setRewardConfig] = useState<RewardProgramConfig>(defaultRewardProgramConfig);
+  const [serviceCatalog, setServiceCatalog] = useState<Service[]>(services);
   const [selectedServiceId, setSelectedServiceId] = useState('occupied-cleaning');
   const [serviceFilter, setServiceFilter] = useState<Filter>('Home Care');
   const [rewardDiscount, setRewardDiscount] = useState(false);
@@ -788,6 +807,7 @@ export default function App() {
   const [deferredSurveyIds, setDeferredSurveyIds] = useState<string[]>([]);
   const [rewardTransactions, setRewardTransactions] = useState<RewardLedgerEntry[]>(initialRewards);
   const [adminTab, setAdminTab] = useState<AdminTab>('Dashboard');
+  const [vendorTab, setVendorTab] = useState<VendorTab>('Available');
   const [supabaseHealth, setSupabaseHealth] = useState<FlairoConnectionHealth | null>(null);
   const [supabaseHealthError, setSupabaseHealthError] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -829,7 +849,7 @@ export default function App() {
     }
 
     if (profile.role === 'vendor') {
-      setScreen('bookings');
+      setScreen('vendor');
       return;
     }
 
@@ -960,14 +980,14 @@ export default function App() {
   );
 
   const selectedService = useMemo(
-    () => services.find((service) => service.id === selectedServiceId) ?? services[0],
-    [selectedServiceId],
+    () => serviceCatalog.find((service) => service.id === selectedServiceId) ?? serviceCatalog[0],
+    [selectedServiceId, serviceCatalog],
   );
   const visibleNavItems = useMemo(
     () => navItems.filter((item) => {
-      if (item.key === 'admin') return canUseAdmin;
-      if (item.key === 'register') return appUser?.role !== 'vendor';
-      return true;
+      if (appUser?.role === 'vendor') return item.key === 'home' || item.key === 'vendor';
+      if (canUseAdmin) return item.key === 'home' || item.key === 'admin' || item.key === 'vendor' || item.key === 'bookings';
+      return item.key === 'home' || item.key === 'register' || item.key === 'services' || item.key === 'bookings';
     }),
     [appUser?.role, canUseAdmin],
   );
@@ -1050,6 +1070,10 @@ export default function App() {
     }
 
     if (screen === 'register' && appUser?.role === 'vendor') {
+      setScreen('vendor');
+    }
+
+    if (screen === 'vendor' && appUser?.role !== 'vendor' && !canUseAdmin) {
       setScreen('home');
     }
   }, [appUser?.role, canUseAdmin, screen]);
@@ -1097,13 +1121,13 @@ export default function App() {
   }, []);
 
   const filteredServices = useMemo(() => {
-    if (serviceFilter === 'All') return services;
-    return services.filter((service) => service.category === serviceFilter);
-  }, [serviceFilter]);
+    if (serviceFilter === 'All') return serviceCatalog;
+    return serviceCatalog.filter((service) => service.category === serviceFilter);
+  }, [serviceCatalog, serviceFilter]);
 
   const chooseFilter = (filter: Filter) => {
     setServiceFilter(filter);
-    const nextService = filter === 'All' ? services[0] : services.find((service) => service.category === filter);
+    const nextService = filter === 'All' ? serviceCatalog[0] : serviceCatalog.find((service) => service.category === filter);
     if (nextService) setSelectedServiceId(nextService.id);
   };
 
@@ -1402,6 +1426,66 @@ export default function App() {
     setAuditEvents((current) => [`${todayISO()} / Plume Point configuration updated.`, ...current]);
   };
 
+  const updateBookingFromVendor = (
+    bookingId: string,
+    patch: {
+      finalResidentPayment: number;
+      serviceDate: string;
+      serviceTitle: string;
+      vendorAdjustmentNote: string;
+    },
+  ) => {
+    const booking = bookings.find((item) => item.id === bookingId);
+    if (!booking) return;
+
+    setBookings((current) => current.map((item) => {
+      if (item.id !== bookingId) return item;
+
+      const finalResidentPayment = Math.max(0, patch.finalResidentPayment);
+      const grossReferralFee = Math.round(finalResidentPayment * item.providerPreferredFeePercent) / 100;
+      const flairoRevenue = Math.max(grossReferralFee - item.creditOffset, 0);
+
+      return {
+        ...item,
+        finalResidentPayment,
+        flairoRevenue,
+        grossReferralFee,
+        jobBoardStatus: item.bookingStatus === 'Requested' ? item.jobBoardStatus : item.jobBoardStatus,
+        paymentStatus: 'Vendor updated service details; resident review pending',
+        providerRetainedAfterReferral: Math.max(finalResidentPayment - flairoRevenue, 0),
+        serviceDate: patch.serviceDate.trim() || item.serviceDate,
+        serviceTitle: patch.serviceTitle.trim() || item.serviceTitle,
+        vendorAdjustmentNote: patch.vendorAdjustmentNote.trim() || undefined,
+        vendorAmount: finalResidentPayment,
+      };
+    }));
+    setAuditEvents((current) => [
+      `${todayISO()} / SYSTEM ALERT: ${booking.vendorName} updated ${bookingId}; resident view refreshed and FLAIRO admin review was notified.`,
+      ...current,
+    ]);
+  };
+
+  const updateServicePricing = (serviceId: string, standardPrice: number, plusPrice: number) => {
+    const service = serviceCatalog.find((item) => item.id === serviceId);
+    const safeStandard = Math.max(0, Math.round(standardPrice));
+    const safePlus = Math.max(0, Math.min(Math.round(plusPrice), safeStandard));
+
+    setServiceCatalog((current) => current.map((item) => (
+      item.id === serviceId
+        ? {
+          ...item,
+          plusPrice: safePlus,
+          pricingTiers: undefined,
+          standardPrice: safeStandard,
+        }
+        : item
+    )));
+    setAuditEvents((current) => [
+      `${todayISO()} / SYSTEM ALERT: Vendor pricing updated for ${service?.title ?? serviceId}; FLAIRO admin review was notified.`,
+      ...current,
+    ]);
+  };
+
   const content = useMemo(() => {
     if (screen === 'register') {
       return <Registration resident={resident} createResident={createResident} />;
@@ -1446,11 +1530,23 @@ export default function App() {
       return (
         <Bookings
           bookings={bookings}
+          setScreen={setScreen}
+        />
+      );
+    }
+
+    if (screen === 'vendor') {
+      return (
+        <VendorPortal
+          bookings={bookings}
           claimBooking={claimBooking}
           confirmBooking={confirmBooking}
-          reverseBooking={reverseBooking}
           scheduleBooking={scheduleBooking}
-          setScreen={setScreen}
+          services={serviceCatalog}
+          setVendorTab={setVendorTab}
+          updateBookingFromVendor={updateBookingFromVendor}
+          updateServicePricing={updateServicePricing}
+          vendorTab={vendorTab}
         />
       );
     }
@@ -1468,6 +1564,7 @@ export default function App() {
           rewardTransactions={rewardTransactions}
           resetScheduleTimer={resetScheduleTimer}
           runExpirationBatch={runExpirationBatch}
+          services={serviceCatalog}
           setAdminTab={setAdminTab}
           surveys={surveys}
           updateRewardConfig={updateRewardConfig}
@@ -1508,10 +1605,12 @@ export default function App() {
     rewardSummary,
     rewardTransactions,
     screen,
+    serviceCatalog,
     selectedService,
     selectedServiceId,
     serviceFilter,
     surveys,
+    vendorTab,
   ]);
 
   if (!authReady) {
@@ -1672,9 +1771,7 @@ function AccessGate({
           <Image resizeMode="contain" source={fullLogo} style={styles.accessLogo} />
           <Text style={styles.eyebrow}>WELCOME TO FLAIRO</Text>
           <Text style={styles.hero}>Exclusive perks. Elevated living.</Text>
-          <Text style={styles.heroBody}>
-            Sign in so FLAIRO can match you to the right resident, vendor, or administrative experience.
-          </Text>
+          <Text style={styles.heroBody}>SIGN IN</Text>
 
           <View style={styles.accessIntentRow}>
             {(['resident', 'vendor', 'admin'] as AccessIntent[]).map((intent) => (
@@ -1689,11 +1786,6 @@ function AccessGate({
                 </Text>
               </TouchableOpacity>
             ))}
-          </View>
-
-          <View style={styles.infoPanel}>
-            <Text style={styles.cardLabelGold}>{activeCopy.title.toUpperCase()}</Text>
-            <Text style={styles.bodyMuted}>{activeCopy.detail}</Text>
           </View>
 
           {!supabaseReady ? (
@@ -1785,6 +1877,30 @@ function Home({
   const community = resident ? findCommunity(resident.communityId) : communities[0];
   const activeStatus = resident?.membershipStatus ?? 'None';
   const nextBooking = bookings[0];
+  const homeActions: Array<{ detail: string; label: string; screen: Screen; primary?: boolean }> = [
+    {
+      detail: resident ? 'Manage your Plus profile' : 'Create your resident profile',
+      label: resident ? 'Join Plus' : 'Join',
+      screen: 'register',
+      primary: !resident,
+    },
+    {
+      detail: 'Explore services near you',
+      label: 'Book Care',
+      screen: 'services',
+      primary: Boolean(resident),
+    },
+    {
+      detail: `${points.toLocaleString()} Plume Points`,
+      label: 'Wallet',
+      screen: 'rewards',
+    },
+    {
+      detail: nextBooking ? nextBooking.bookingStatus : 'No active booking',
+      label: 'Activity',
+      screen: 'bookings',
+    },
+  ];
 
   return (
     <View>
@@ -1793,46 +1909,32 @@ function Home({
         <Text style={styles.eyebrow}>EXCLUSIVE PERKS. ELEVATED LIVING.</Text>
         <Text style={styles.hero}>Resident services, priced for your home.</Text>
         <Text style={styles.heroBody}>
-          Your home services, FLAIRO Plus benefits, Plume Points, and booking updates stay together after you sign in.
+          Create an account with FLAIRO and sign up for FLAIRO Plus benefits to earn Plume Points on your first service today which helps you save on services tomorrow
         </Text>
-        <View style={styles.heroActions}>
-          <TouchableOpacity style={styles.primaryButton} onPress={() => setScreen(resident ? 'services' : 'register')}>
-            <Text style={styles.primaryButtonText}>{resident ? 'Book Home Care' : 'Create account'}</Text>
+      </View>
+
+      <View style={styles.homeActionGrid}>
+        {homeActions.map((action) => (
+          <TouchableOpacity
+            accessibilityRole="button"
+            key={action.label}
+            onPress={() => setScreen(action.screen)}
+            style={[styles.homeActionButton, action.primary && styles.homeActionButtonPrimary]}
+          >
+            <Text style={[styles.homeActionLabel, action.primary && styles.homeActionLabelPrimary]}>{action.label}</Text>
+            <Text style={[styles.homeActionDetail, action.primary && styles.homeActionDetailPrimary]}>{action.detail}</Text>
           </TouchableOpacity>
-          {canUseAdmin ? (
-            <TouchableOpacity style={styles.ghostButton} onPress={() => setScreen('admin')}>
-              <Text style={styles.ghostButtonText}>Admin Control</Text>
-            </TouchableOpacity>
-          ) : null}
+        ))}
+      </View>
+
+      <View style={styles.signedInStrip}>
+        <View style={styles.signedInCopy}>
+          <Text style={styles.cardLabelGold}>SIGNED IN</Text>
+          <Text style={styles.smallMuted}>{appUser?.email ?? 'Supabase session'} / {appUser?.role.replace(/_/g, ' ') ?? 'pending'}</Text>
         </View>
-      </View>
-
-      <View style={styles.infoPanel}>
-        <Text style={styles.cardLabelGold}>SIGNED IN</Text>
-        <PriceLine label="Account" value={appUser?.email ?? 'Supabase session'} />
-        <PriceLine label="FLAIRO role" value={appUser?.role.replace(/_/g, ' ') ?? 'pending'} />
-        <TouchableOpacity style={styles.ghostButtonWide} onPress={onSignOut}>
-          <Text style={styles.ghostButtonText}>Sign out</Text>
+        <TouchableOpacity style={styles.smallActionButton} onPress={onSignOut}>
+          <Text style={styles.smallActionButtonText}>Sign out</Text>
         </TouchableOpacity>
-      </View>
-
-      <View style={styles.statGrid}>
-        <StatCard label="Home" value={resident ? resident.unit.unitNumber : 'Not set'} detail={resident ? `${resident.unit.bedrooms}BR / ${resident.unit.bathrooms}BA` : 'Register first'} />
-        <StatCard label="Plus" value={isPlusEligible(activeStatus) ? activeStatus : 'Off'} detail={community.plusAvailable ? 'available here' : 'not enabled'} />
-        <StatCard label="Plume Points" value={points.toLocaleString()} detail={`${formatCents(rewardSummary.outstandingLiabilityCents)} redeemable`} />
-      </View>
-
-      <View style={styles.infoPanel}>
-        <Text style={supabaseReady ? styles.cardLabelGold : styles.cardLabelPink}>
-          {supabaseHealth?.database_ready ? 'LIVE FLAIRO TABLES CONNECTED' : supabaseReady ? 'SUPABASE CONFIGURED' : 'SUPABASE KEY NEEDED'}
-        </Text>
-        <Text style={styles.bodyMuted}>
-          {supabaseHealth?.database_ready
-            ? `${supabaseHealth.flairo_table_count} FLAIRO tables are reachable for Auth, booking, rewards, survey, vendor, and invoice workflows.`
-            : supabaseReady
-              ? supabaseHealthError ?? 'The mobile app has the project URL and public key needed for live Auth and database calls.'
-            : 'The project URL is set. Paste the Supabase publishable key into .env to turn on live Auth and database calls.'}
-        </Text>
       </View>
 
       <View style={styles.infoPanel}>
@@ -1842,32 +1944,28 @@ function Home({
         <Text style={styles.bodyMuted}>
           {resident
             ? `Unit ${resident.unit.unitNumber} is ${resident.unit.verificationStatus}${resident.unit.duplicateReview ? ' and flagged for duplicate review.' : '.'}`
-            : 'Registration builds the unit directory without requiring PMS data.'}
+            : 'Create your home profile to unlock resident pricing.'}
         </Text>
+        <PriceLine label="FLAIRO Plus" value={isPlusEligible(activeStatus) ? activeStatus : community.plusAvailable ? 'Available' : 'Not enabled'} />
+        <PriceLine label="Plume Points" value={`${points.toLocaleString()} / ${formatCents(rewardSummary.outstandingLiabilityCents)} redeemable`} />
       </View>
 
       <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Resident snapshot</Text>
+        <Text style={styles.sectionTitle}>Upcoming service</Text>
         <TouchableOpacity onPress={() => setScreen('profile')}>
           <Text style={styles.sectionLink}>Profile</Text>
         </TouchableOpacity>
       </View>
       <View style={styles.listItem}>
         <View style={styles.listCopy}>
-          <Text style={styles.cardTitle}>Upcoming service</Text>
+          <Text style={styles.cardTitle}>{nextBooking ? nextBooking.serviceTitle : 'No active booking yet'}</Text>
           <Text style={styles.bodyMuted}>
-            {nextBooking ? `${nextBooking.serviceTitle} / ${nextBooking.bookingStatus} / ${money(nextBooking.finalResidentPayment)}` : 'No active booking yet.'}
+            {nextBooking ? `${nextBooking.bookingStatus} / ${money(nextBooking.finalResidentPayment)} pending vendor validation` : 'Book care when you are ready.'}
           </Text>
         </View>
         <TouchableOpacity onPress={() => setScreen(nextBooking ? 'bookings' : 'services')}>
           <Text style={styles.chevron}>{nextBooking ? 'Open' : 'Book'}</Text>
         </TouchableOpacity>
-      </View>
-
-      <View style={styles.benefitStrip}>
-        <BenefitTile title="Resident -> Provider" detail="Direct payment model" />
-        <BenefitTile title="Plume ledger" detail="Every credit traced" />
-        <BenefitTile title="Configurable" detail="Rules, caps, pricing" />
       </View>
     </View>
   );
@@ -1927,8 +2025,7 @@ function Registration({
     <View>
       <PageIntro
         kicker="CREATE RESIDENT ACCOUNT"
-        title="Self-registration without PMS dependency."
-        body="Residents identify their community and unit. FLAIRO keeps the unit record for future pricing, validation, and administration."
+        title="Welcome to the FLAIRO registration page."
       />
 
       <View style={styles.formPanel}>
@@ -1958,16 +2055,6 @@ function Registration({
         <StatusPicker selected={membershipStatus} setSelected={setMembershipStatus} />
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
-        <View style={styles.validationPanel}>
-          <Text style={styles.cardLabelGold}>UNIT VALIDATION</Text>
-          <Text style={styles.bodyMuted}>Format: {community.unitFormat}</Text>
-          <Text style={styles.bodyMuted}>
-            {duplicateReview
-              ? 'Existing active unit found. Registration is allowed but flagged for admin review.'
-              : 'No matching active unit found. A new unit record will be created.'}
-          </Text>
-        </View>
-
         <TouchableOpacity style={styles.primaryButtonWide} onPress={submit}>
           <Text style={styles.primaryButtonText}>Create resident profile</Text>
         </TouchableOpacity>
@@ -2063,8 +2150,8 @@ function Services({
     <View>
       <PageIntro
         kicker="HOME CARE"
-        title="Occupied cleaning priced from the resident profile."
-        body="Bedroom and bathroom counts are captured once during registration and reused for service pricing."
+        title="Select the home care option that works best for you"
+        body="Rates are determined by home size and are set at vendor discretion. Explore the current services available in your area. Book today!"
       />
 
       <ScrollView contentContainerStyle={styles.categoryRail} horizontal showsHorizontalScrollIndicator={false}>
@@ -2094,24 +2181,21 @@ function Services({
 
         <View style={styles.pricePanel}>
           <Text style={styles.cardLabelPink}>PRICE SNAPSHOT</Text>
-          <PriceLine label="Unit profile" value={resident ? `${pricing.label}` : 'Create account first'} />
+          <PriceLine label="Home size" value={resident ? `${pricing.label}` : 'Create account first'} />
           <PriceLine label="Standard price" value={money(pricing.standardPrice)} />
           <PriceLine label="FLAIRO PLUS price" value={`${money(pricing.plusPrice)} / save ${money(savings)}`} />
-          <PriceLine label="Eligible PLUS status" value={plusEligible ? resident?.membershipStatus ?? 'None' : 'Not active'} />
+          <PriceLine label="Plus status" value={plusEligible ? resident?.membershipStatus ?? 'None' : 'Not active'} />
           <PriceLine label="Available Plume Points" value={`${rewardSummary.availablePoints.toLocaleString()} / ${formatCents(pointsToCreditCents(rewardSummary.availablePoints, rewardConfig))}`} />
-          <PriceLine label="Maximum Plume Points applied" value={checkout.maxRedeemablePoints.toLocaleString()} />
-          <PriceLine label="Plume Point credit" value={checkout.residentCreditCents > 0 ? `-${formatCents(checkout.residentCreditCents)} / ${checkout.appliedPoints.toLocaleString()} Plume Points` : 'None applied'} />
-          <PriceLine label="Resident pays provider" value={formatCents(checkout.residentPaysProviderCents)} emphasized />
+          {checkout.residentCreditCents > 0 ? (
+            <PriceLine label="Plume Points credit" value={`-${formatCents(checkout.residentCreditCents)} / ${checkout.appliedPoints.toLocaleString()} Plume Points`} />
+          ) : null}
           <PriceLine label="Plume Points after completion" value={plusEligible ? `${earned.totalPoints.toLocaleString()} (${earned.basePoints} base + ${earned.completionBonusPoints} bonus${earned.recurringBonusPoints ? ` + ${earned.recurringBonusPoints} loyalty` : ''})` : 'Join FLAIRO Plus to earn'} />
           <PriceLine label="PLUS advantage" value={plusEligible ? `${earned.plusAdditionalPoints.toLocaleString()} extra Plume Points and ${money(savings)} saved` : `Upgrade: +${Math.max(plusEarned.totalPoints - freeEarned.totalPoints, 0).toLocaleString()} Plume Points / ${money(savings)} saved`} />
           <PriceLine label="Provider" value={`${agreement.vendorName}${agreement.preferred ? ' / Preferred FLAIRO vendor' : ''}`} />
           <PriceLine label="Provider rating" value={`${vendorExperienceRating(agreement.vendorName, surveys, agreement.customerExperienceRating).toFixed(1)} customer experience avg`} />
           <PriceLine label="Payment route" value="Resident pays connected vendor" />
-          <PriceLine label={`Gross ${flairoFeePercent}% referral fee`} value={formatCents(checkout.grossReferralFeeCents)} />
-          <PriceLine label="Credit offset" value={formatCents(checkout.creditOffsetCents)} />
-          <PriceLine label="Net owed to FLAIRO" value={formatCents(checkout.netReferralFeeOwedCents)} />
-          <PriceLine label="Discount funding" value={agreement.discountTreatment} />
           {serviceIsRecurring ? <PriceLine label="Recurring milestone" value={recurringStatus.message} /> : null}
+          <PriceLine label="Estimated total" value={`${formatCents(checkout.residentPaysProviderCents)} / pending vendor validation for final rate`} emphasized />
         </View>
 
         <TouchableOpacity
@@ -2125,7 +2209,7 @@ function Services({
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.primaryButtonWide} onPress={bookService}>
-          <Text style={styles.primaryButtonText}>{resident ? 'Book and snapshot pricing' : 'Register to book'}</Text>
+          <Text style={styles.primaryButtonText}>{resident ? 'Request this service' : 'Register to book'}</Text>
         </TouchableOpacity>
       </View>
 
@@ -2342,25 +2426,17 @@ function Rewards({
 
 function Bookings({
   bookings,
-  claimBooking,
-  confirmBooking,
-  reverseBooking,
-  scheduleBooking,
   setScreen,
 }: {
   bookings: Booking[];
-  claimBooking: (bookingId: string) => void;
-  confirmBooking: (bookingId: string) => void;
-  reverseBooking: (bookingId: string) => void;
-  scheduleBooking: (bookingId: string) => void;
   setScreen: (screen: Screen) => void;
 }) {
   return (
     <View>
       <PageIntro
-        kicker="BOOKING ACTIVITY"
-        title="Historical pricing is preserved."
-        body="Bookings snapshot the agreed price, Plume Point redemption, vendor payment route, and FLAIRO revenue obligation."
+        kicker="ACTIVITY"
+        title="Recent Activity"
+        body="Bookings are subject to vendor availability and rates are reviewed and finalized with you directly from the vendor upon acceptance of the request"
       />
 
       {bookings.length === 0 ? (
@@ -2375,14 +2451,329 @@ function Bookings({
         bookings.map((booking) => (
           <BookingCard
             booking={booking}
-            claimBooking={claimBooking}
-            confirmBooking={confirmBooking}
             key={booking.id}
-            reverseBooking={reverseBooking}
-            scheduleBooking={scheduleBooking}
           />
         ))
       )}
+    </View>
+  );
+}
+
+function VendorPortal({
+  bookings,
+  claimBooking,
+  confirmBooking,
+  scheduleBooking,
+  services,
+  setVendorTab,
+  updateBookingFromVendor,
+  updateServicePricing,
+  vendorTab,
+}: {
+  bookings: Booking[];
+  claimBooking: (bookingId: string) => void;
+  confirmBooking: (bookingId: string) => void;
+  scheduleBooking: (bookingId: string) => void;
+  services: Service[];
+  setVendorTab: (tab: VendorTab) => void;
+  updateBookingFromVendor: (
+    bookingId: string,
+    patch: {
+      finalResidentPayment: number;
+      serviceDate: string;
+      serviceTitle: string;
+      vendorAdjustmentNote: string;
+    },
+  ) => void;
+  updateServicePricing: (serviceId: string, standardPrice: number, plusPrice: number) => void;
+  vendorTab: VendorTab;
+}) {
+  const availableJobs = bookings.filter((booking) => booking.bookingStatus === 'Requested');
+  const claimedJobs = bookings.filter((booking) => booking.bookingStatus === 'Claimed' || booking.bookingStatus === 'Scheduled');
+  const paymentJobs = bookings.filter((booking) => booking.bookingStatus === 'Completed' || booking.settlementStatus !== 'Not started');
+  const activeJobs = bookings.filter((booking) => booking.bookingStatus !== 'Refunded');
+
+  const emptyVendorState = (title: string, detail: string) => (
+    <View style={styles.emptyState}>
+      <Text style={styles.cardTitle}>{title}</Text>
+      <Text style={styles.bodyMuted}>{detail}</Text>
+    </View>
+  );
+
+  return (
+    <View>
+      <PageIntro
+        kicker="VENDOR DASHBOARD"
+        title="Vendor Portal"
+        body="Accept, schedule, and adjust work all from this dashboard. Any work not booked within a reasonable timeframe will be reallocated to an available vendor. Please accept and schedule quickly to improve your vendor score and booking velocity. Resident Membership Plume Points when redeemed will be deducted from the FLAIRO payout and will not affect your portion of the work payout."
+      />
+
+      <ScrollView contentContainerStyle={styles.categoryRail} horizontal showsHorizontalScrollIndicator={false}>
+        {vendorTabs.map((tab) => (
+          <TouchableOpacity
+            accessibilityRole="button"
+            key={tab}
+            onPress={() => setVendorTab(tab)}
+            style={[styles.chip, vendorTab === tab && styles.chipActive]}
+          >
+            <Text style={[styles.chipText, vendorTab === tab && styles.chipTextActive]}>{tab}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {vendorTab === 'Available' ? (
+        <AdminSection title="Available jobs">
+          {availableJobs.length
+            ? availableJobs.map((booking) => (
+              <VendorJobCard
+                booking={booking}
+                key={booking.id}
+                onAccept={() => claimBooking(booking.id)}
+              />
+            ))
+            : emptyVendorState('No available jobs', 'New resident requests will appear here when they are ready for vendor acceptance.')}
+        </AdminSection>
+      ) : null}
+
+      {vendorTab === 'Claimed' ? (
+        <AdminSection title="Claimed jobs">
+          {claimedJobs.length
+            ? claimedJobs.map((booking) => (
+              <VendorJobCard
+                booking={booking}
+                key={booking.id}
+                onComplete={() => confirmBooking(booking.id)}
+                onSchedule={() => scheduleBooking(booking.id)}
+              />
+            ))
+            : emptyVendorState('No claimed jobs', 'Accepted and scheduled work will appear here.')}
+        </AdminSection>
+      ) : null}
+
+      {vendorTab === 'Payments' ? (
+        <AdminSection title="Payments">
+          {paymentJobs.length ? (
+            paymentJobs.map((booking) => (
+              <View key={booking.id} style={styles.bookingCard}>
+                <Text style={styles.cardLabelGold}>{booking.settlementStatus.toUpperCase()}</Text>
+                <Text style={styles.cardTitle}>{booking.id} / {booking.serviceTitle}</Text>
+                <Text style={styles.bodyMuted}>{booking.residentName} / {booking.communityName}, Unit {booking.unitNumber}</Text>
+                <View style={styles.pricePanelCompact}>
+                  <PriceLine label="Resident total" value={money(booking.finalResidentPayment)} emphasized />
+                  <PriceLine label="FLAIRO payout adjustment" value={money(Math.max(booking.flairoRevenue, 0))} />
+                  <PriceLine label="Vendor payout protected" value={money(booking.vendorAmount)} />
+                  <PriceLine label="Payment status" value={booking.paymentStatus} />
+                </View>
+              </View>
+            ))
+          ) : emptyVendorState('No payments yet', 'Completed work and settlement status will appear here.')}
+        </AdminSection>
+      ) : null}
+
+      {vendorTab === 'Services' ? (
+        <AdminSection title="Service details">
+          {activeJobs.length
+            ? activeJobs.map((booking) => (
+              <VendorEditableBookingCard
+                booking={booking}
+                key={booking.id}
+                onSave={updateBookingFromVendor}
+              />
+            ))
+            : emptyVendorState('No service details yet', 'Accept a job to edit schedule, service details, and resident-facing price updates.')}
+        </AdminSection>
+      ) : null}
+
+      {vendorTab === 'Pricing' ? (
+        <AdminSection title="Pricing">
+          <View style={styles.infoPanel}>
+            <Text style={styles.cardLabelPink}>PLUS PLAN RATES</Text>
+            <Text style={styles.bodyMuted}>
+              Plus plan rates should be a better value to entice residents to sign up for the program for recurring service requests
+            </Text>
+          </View>
+          {services.map((service) => (
+            <VendorPricingEditor
+              key={service.id}
+              onSave={updateServicePricing}
+              service={service}
+            />
+          ))}
+        </AdminSection>
+      ) : null}
+    </View>
+  );
+}
+
+function VendorJobCard({
+  booking,
+  onAccept,
+  onComplete,
+  onSchedule,
+}: {
+  booking: Booking;
+  onAccept?: () => void;
+  onComplete?: () => void;
+  onSchedule?: () => void;
+}) {
+  return (
+    <View style={styles.bookingCard}>
+      <View style={styles.rowBetweenTop}>
+        <View style={styles.bookingCopy}>
+          <Text style={styles.cardLabelGold}>{booking.bookingStatus} / {booking.jobBoardStatus}</Text>
+          <Text style={styles.cardTitle}>{booking.serviceTitle}</Text>
+          <Text style={styles.bodyMuted}>{booking.residentName} / {booking.communityName}, Unit {booking.unitNumber}</Text>
+        </View>
+        <View style={styles.dateBadge}>
+          <Text style={styles.dateBadgeText}>{booking.serviceDate}</Text>
+        </View>
+      </View>
+      <View style={styles.pricePanelCompact}>
+        <PriceLine label="Home" value={booking.unitConfig} />
+        <PriceLine label="Resident estimate" value={`${money(booking.finalResidentPayment)} pending validation`} emphasized />
+        <PriceLine label="Plume Points redeemed" value={booking.pointsRedeemed ? booking.pointsRedeemed.toLocaleString() : 'None'} />
+        <PriceLine label="Schedule timer" value={scheduleCountdown(booking)} />
+        {booking.vendorAdjustmentNote ? <PriceLine label="Vendor note" value={booking.vendorAdjustmentNote} /> : null}
+      </View>
+      <View style={styles.actionRow}>
+        {onAccept && booking.bookingStatus === 'Requested' ? (
+          <TouchableOpacity onPress={onAccept} style={styles.primaryButton}>
+            <Text style={styles.primaryButtonText}>Accept job</Text>
+          </TouchableOpacity>
+        ) : null}
+        {onSchedule && booking.bookingStatus === 'Claimed' ? (
+          <TouchableOpacity onPress={onSchedule} style={styles.ghostButtonWideHalf}>
+            <Text style={styles.ghostButtonText}>Enter schedule</Text>
+          </TouchableOpacity>
+        ) : null}
+        {onComplete && booking.bookingStatus === 'Scheduled' ? (
+          <TouchableOpacity onPress={onComplete} style={styles.ghostButtonWideHalf}>
+            <Text style={styles.ghostButtonText}>Mark completed</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function VendorEditableBookingCard({
+  booking,
+  onSave,
+}: {
+  booking: Booking;
+  onSave: (
+    bookingId: string,
+    patch: {
+      finalResidentPayment: number;
+      serviceDate: string;
+      serviceTitle: string;
+      vendorAdjustmentNote: string;
+    },
+  ) => void;
+}) {
+  const [serviceTitle, setServiceTitle] = useState(booking.serviceTitle);
+  const [serviceDate, setServiceDate] = useState(booking.serviceDate);
+  const [residentTotal, setResidentTotal] = useState(booking.finalResidentPayment.toString());
+  const [note, setNote] = useState(booking.vendorAdjustmentNote ?? '');
+
+  useEffect(() => {
+    setServiceTitle(booking.serviceTitle);
+    setServiceDate(booking.serviceDate);
+    setResidentTotal(booking.finalResidentPayment.toString());
+    setNote(booking.vendorAdjustmentNote ?? '');
+  }, [booking.finalResidentPayment, booking.id, booking.serviceDate, booking.serviceTitle, booking.vendorAdjustmentNote]);
+
+  const save = () => {
+    onSave(booking.id, {
+      finalResidentPayment: parseEditableMoney(residentTotal, booking.finalResidentPayment),
+      serviceDate,
+      serviceTitle,
+      vendorAdjustmentNote: note,
+    });
+  };
+
+  return (
+    <View style={styles.bookingCard}>
+      <Text style={styles.cardLabelGold}>{booking.id} / {booking.bookingStatus}</Text>
+      <Text style={styles.cardTitle}>{booking.residentName}</Text>
+      <Text style={styles.bodyMuted}>{booking.communityName}, Unit {booking.unitNumber}</Text>
+
+      <FormField label="Service" value={serviceTitle} onChangeText={setServiceTitle} />
+      <FormField label="Schedule" value={serviceDate} onChangeText={setServiceDate} />
+      <View style={styles.fieldBlock}>
+        <Text style={styles.fieldLabel}>Resident total</Text>
+        <TextInput
+          keyboardType="numeric"
+          onChangeText={setResidentTotal}
+          style={styles.input}
+          value={residentTotal}
+        />
+      </View>
+      <View style={styles.fieldBlock}>
+        <Text style={styles.fieldLabel}>Vendor note</Text>
+        <TextInput
+          multiline
+          onChangeText={setNote}
+          style={[styles.input, styles.textArea]}
+          value={note}
+        />
+      </View>
+      <TouchableOpacity style={styles.primaryButtonWide} onPress={save}>
+        <Text style={styles.primaryButtonText}>Save and alert admin</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function VendorPricingEditor({
+  onSave,
+  service,
+}: {
+  onSave: (serviceId: string, standardPrice: number, plusPrice: number) => void;
+  service: Service;
+}) {
+  const base = getBaseServicePricing(service);
+  const [standardPrice, setStandardPrice] = useState(base.standardPrice.toString());
+  const [plusPrice, setPlusPrice] = useState(base.plusPrice.toString());
+
+  useEffect(() => {
+    const nextBase = getBaseServicePricing(service);
+    setStandardPrice(nextBase.standardPrice.toString());
+    setPlusPrice(nextBase.plusPrice.toString());
+  }, [service]);
+
+  const standardValue = parseEditableMoney(standardPrice, base.standardPrice);
+  const plusValue = parseEditableMoney(plusPrice, base.plusPrice);
+
+  return (
+    <View style={styles.bookingCard}>
+      <Text style={styles.cardLabelGold}>{service.category.toUpperCase()}</Text>
+      <Text style={styles.cardTitle}>{service.title}</Text>
+      <Text style={styles.bodyMuted}>{service.subtitle}</Text>
+      <View style={styles.actionRow}>
+        <View style={styles.halfField}>
+          <Text style={styles.fieldLabel}>Standard</Text>
+          <TextInput
+            keyboardType="numeric"
+            onChangeText={setStandardPrice}
+            style={styles.input}
+            value={standardPrice}
+          />
+        </View>
+        <View style={styles.halfField}>
+          <Text style={styles.fieldLabel}>Plus</Text>
+          <TextInput
+            keyboardType="numeric"
+            onChangeText={setPlusPrice}
+            style={styles.input}
+            value={plusPrice}
+          />
+        </View>
+      </View>
+      <Text style={styles.bodyMuted}>Current value: Standard {money(standardValue)} / Plus {money(plusValue)}</Text>
+      <TouchableOpacity style={styles.ghostButtonWide} onPress={() => onSave(service.id, standardValue, plusValue)}>
+        <Text style={styles.ghostButtonText}>Save pricing</Text>
+      </TouchableOpacity>
     </View>
   );
 }
@@ -2398,6 +2789,7 @@ function Admin({
   rewardTransactions,
   resetScheduleTimer,
   runExpirationBatch,
+  services,
   setAdminTab,
   surveys,
   updateRewardConfig,
@@ -2412,6 +2804,7 @@ function Admin({
   rewardTransactions: RewardLedgerEntry[];
   resetScheduleTimer: (bookingId: string) => void;
   runExpirationBatch: () => void;
+  services: Service[];
   setAdminTab: (tab: AdminTab) => void;
   surveys: CustomerExperienceSurvey[];
   updateRewardConfig: (patch: Partial<RewardProgramConfig>) => void;
@@ -2446,6 +2839,10 @@ function Admin({
     ? (completedSurveys.reduce((sum, survey) => sum + (survey.rating ?? 0), 0) / completedSurveys.length).toFixed(1)
     : 'No responses';
   const providerExperience = buildProviderExperienceStats(surveys);
+  const requestedBookings = bookings.filter((booking) => booking.bookingStatus === 'Requested');
+  const claimedBookings = bookings.filter((booking) => booking.bookingStatus === 'Claimed');
+  const scheduledBookings = bookings.filter((booking) => booking.bookingStatus === 'Scheduled');
+  const controlAlerts = auditEvents.slice(0, 3);
 
   const patchRewardConfig = (patch: Partial<RewardProgramConfig>) => updateRewardConfig(patch);
   const updateNumericSetting = (
@@ -2466,9 +2863,9 @@ function Admin({
   return (
     <View>
       <PageIntro
-        kicker="FLAIRO ADMIN PORTAL"
-        title="Plume Points, providers, settlement, and audit."
-        body="Settings in this screen update the live resident wallet, checkout limits, service eligibility, and reporting cards."
+        kicker="FLAIRO ADMIN"
+        title="Mobile control center."
+        body="A quick operating view for resident requests, vendor timers, Plume Points, and account alerts while you are on the go."
       />
 
       <ScrollView contentContainerStyle={styles.categoryRail} horizontal showsHorizontalScrollIndicator={false}>
@@ -2487,21 +2884,43 @@ function Admin({
       {adminTab === 'Dashboard' ? (
         <View>
           <View style={styles.statGrid}>
-            <StatCard label="Bookings" value={bookings.length.toString()} detail="total requests" />
-            <StatCard label="GSV" value={money(grossServiceValue)} detail="gross service value" />
-            <StatCard label="FLAIRO" value={money(flairoRevenue)} detail="net referral revenue" />
-            <StatCard label="CX" value={averageCxScore} detail={`${flaggedSurveys.length} follow-up flags`} />
+            <StatCard label="Open" value={requestedBookings.length.toString()} detail="available jobs" />
+            <StatCard label="Claimed" value={claimedBookings.length.toString()} detail="need schedule" />
+            <StatCard label="Scheduled" value={scheduledBookings.length.toString()} detail="in progress" />
+          </View>
+          <View style={styles.statGrid}>
+            <StatCard label="Plume" value={formatCents(rewardSummary.outstandingLiabilityCents)} detail="available liability" />
+            <StatCard label="CX" value={averageCxScore} detail={`${flaggedSurveys.length} flags`} />
+            <StatCard label="PLUS" value={activePlusMembers.toString()} detail={`${money(membershipRevenue)} monthly`} />
           </View>
           <View style={styles.infoPanel}>
-            <Text style={styles.cardLabelGold}>REPORTING DASHBOARD</Text>
-            <PriceLine label="Active Plus members" value={activeMembers.toString()} />
-            <PriceLine label="Active PLUS members" value={activePlusMembers.toString()} />
-            <PriceLine label="Monthly membership revenue" value={money(membershipRevenue)} />
-            <PriceLine label="Vendor revenue collected directly" value={money(vendorRevenue)} />
-            <PriceLine label="Outstanding Plume Point liability" value={formatCents(rewardSummary.outstandingLiabilityCents)} />
-            <PriceLine label="Pending Plume Point liability" value={formatCents(rewardSummary.pendingLiabilityCents)} />
-            <PriceLine label="Bookings by community" value={resident ? findCommunity(resident.communityId).name : 'None yet'} />
-            <PriceLine label="Drill-down source" value="Bookings, Plume Point ledger, provider fee ledger" />
+            <Text style={styles.cardLabelGold}>TODAY</Text>
+            <PriceLine label="Resident requests" value={`${requestedBookings.length} open / ${bookings.length} total`} />
+            <PriceLine label="Vendor scheduling" value={`${claimedBookings.length} claimed / ${scheduledBookings.length} scheduled`} />
+            <PriceLine label="Resident community" value={resident ? findCommunity(resident.communityId).name : 'None yet'} />
+            <PriceLine label="Vendor revenue" value={money(vendorRevenue)} />
+          </View>
+          <Text style={styles.sectionTitle}>Control alerts</Text>
+          {controlAlerts.length ? (
+            controlAlerts.map((event) => (
+              <AdminRow key={event} title={event.split(' / ')[0]} detail={event} />
+            ))
+          ) : (
+            <AdminRow title="No alerts" detail="Vendor edits, Plume adjustments, and scheduling exceptions will appear here." />
+          )}
+          <View style={styles.actionRow}>
+            <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={() => setAdminTab('Bookings')}>
+              <Text style={styles.ghostButtonText}>Bookings</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={() => setAdminTab('Vendors')}>
+              <Text style={styles.ghostButtonText}>Vendors</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={() => setAdminTab('Plume Points')}>
+              <Text style={styles.ghostButtonText}>Plume</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.ghostButtonWideHalf} onPress={() => setAdminTab('Audit')}>
+              <Text style={styles.ghostButtonText}>Audit</Text>
+            </TouchableOpacity>
           </View>
         </View>
       ) : null}
@@ -2830,16 +3249,8 @@ function Profile({
 
 function BookingCard({
   booking,
-  claimBooking,
-  confirmBooking,
-  reverseBooking,
-  scheduleBooking,
 }: {
   booking: Booking;
-  claimBooking: (bookingId: string) => void;
-  confirmBooking: (bookingId: string) => void;
-  reverseBooking: (bookingId: string) => void;
-  scheduleBooking: (bookingId: string) => void;
 }) {
   return (
     <View style={styles.bookingCard}>
@@ -2854,21 +3265,18 @@ function BookingCard({
         </View>
       </View>
       <View style={styles.pricePanelCompact}>
-        <PriceLine label="Original eligible subtotal" value={money(booking.originalEligibleSubtotal)} />
         <PriceLine label="Standard" value={money(booking.standardPrice)} />
         <PriceLine label="PLUS" value={money(booking.plusPrice)} />
-        <PriceLine label="Discount" value={`-${money(booking.discount)} / ${booking.pointsRedeemed} Plume Points`} />
-        <PriceLine label="Resident pays vendor" value={money(booking.finalResidentPayment)} emphasized />
-        <PriceLine label={`Gross ${booking.providerPreferredFeePercent}% referral fee`} value={money(booking.grossReferralFee)} />
-        <PriceLine label="Credit offset" value={money(booking.creditOffset)} />
-        <PriceLine label="Vendor owes FLAIRO" value={money(booking.flairoRevenue)} />
-        <PriceLine label="Provider retains after fee" value={money(booking.providerRetainedAfterReferral)} />
+        {booking.discount > 0 ? (
+          <PriceLine label="Plume Points credit" value={`-${money(booking.discount)} / ${booking.pointsRedeemed} Plume Points`} />
+        ) : null}
+        <PriceLine label="Estimated total" value={`${money(booking.finalResidentPayment)} / pending vendor validation for final rate`} emphasized />
+        <PriceLine label="Vendor" value={booking.vendorName} />
         <PriceLine label="Plume Point status" value={`${booking.pointStatus} / ${booking.earnedTotalPoints.toLocaleString()} Plume Points`} />
-        <PriceLine label="Settlement" value={booking.settlementStatus} />
-        <PriceLine label="Job board" value={`${booking.jobBoardStatus}${booking.providerPreferred ? ' / preferred first look' : ''}`} />
-        <PriceLine label="Provider CX" value={`${booking.providerExperienceScoreAtBooking.toFixed(1)} avg / ${booking.providerPreferredFeePercent}% FLAIRO fee`} />
+        <PriceLine label="Booking status" value={booking.bookingStatus} />
         {booking.vendorClaimedAt ? <PriceLine label="Accepted" value={formatDateTimeLabel(booking.vendorClaimedAt)} /> : null}
         {booking.scheduleDueAt ? <PriceLine label="Schedule due" value={formatDateTimeLabel(booking.scheduleDueAt)} /> : null}
+        {booking.vendorAdjustmentNote ? <PriceLine label="Vendor note" value={booking.vendorAdjustmentNote} /> : null}
       </View>
       {booking.bookingStatus === 'Claimed' ? (
         <View style={isScheduleOverdue(booking) ? styles.warningPanelInline : styles.timerPanel}>
@@ -2883,35 +3291,6 @@ function BookingCard({
           ))}
         </View>
       ) : null}
-      <View style={styles.actionRow}>
-        {booking.bookingStatus === 'Requested' ? (
-          <TouchableOpacity onPress={() => claimBooking(booking.id)} style={styles.ghostButtonWideHalf}>
-            <Text style={styles.ghostButtonText}>Vendor accept work</Text>
-          </TouchableOpacity>
-        ) : null}
-        {booking.bookingStatus === 'Claimed' ? (
-          <TouchableOpacity onPress={() => scheduleBooking(booking.id)} style={styles.ghostButtonWideHalf}>
-            <Text style={styles.ghostButtonText}>Enter schedule</Text>
-          </TouchableOpacity>
-        ) : null}
-        <TouchableOpacity
-          disabled={booking.bookingStatus !== 'Scheduled'}
-          onPress={() => confirmBooking(booking.id)}
-          style={[
-            styles.ghostButtonWideHalf,
-            booking.bookingStatus !== 'Scheduled' && styles.disabledButton,
-          ]}
-        >
-          <Text style={styles.ghostButtonText}>Mark completed</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          disabled={booking.bookingStatus === 'Refunded'}
-          onPress={() => reverseBooking(booking.id)}
-          style={[styles.ghostButtonWideHalf, booking.bookingStatus === 'Refunded' && styles.disabledButton]}
-        >
-          <Text style={styles.ghostButtonText}>Refund/reverse</Text>
-        </TouchableOpacity>
-      </View>
     </View>
   );
 }
@@ -3096,12 +3475,12 @@ function StatusPicker({ selected, setSelected }: { selected: MembershipStatus; s
   );
 }
 
-function PageIntro({ body, kicker, title }: { body: string; kicker: string; title: string }) {
+function PageIntro({ body, kicker, title }: { body?: string; kicker: string; title: string }) {
   return (
     <View style={styles.pageIntro}>
       <Text style={styles.eyebrow}>{kicker}</Text>
       <Text style={styles.pageTitle}>{title}</Text>
-      <Text style={styles.pageBody}>{body}</Text>
+      {body ? <Text style={styles.pageBody}>{body}</Text> : null}
     </View>
   );
 }
@@ -3434,6 +3813,42 @@ const styles = StyleSheet.create({
   ghostButtonText: { color: colors.ivory, fontSize: 14, fontWeight: '900', textAlign: 'center' },
   disabledButton: { opacity: 0.45 },
   actionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 14 },
+  homeActionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 14,
+  },
+  homeActionButton: {
+    backgroundColor: colors.charcoalLift,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    minHeight: 96,
+    padding: 14,
+    width: '48%',
+  },
+  homeActionButtonPrimary: {
+    backgroundColor: colors.pink,
+    borderColor: colors.pink,
+  },
+  homeActionLabel: { color: colors.ivory, fontSize: 18, fontWeight: '900', lineHeight: 22 },
+  homeActionLabelPrimary: { color: colors.matte },
+  homeActionDetail: { color: colors.ivoryMuted, fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 8 },
+  homeActionDetailPrimary: { color: colors.matte },
+  signedInStrip: {
+    alignItems: 'center',
+    borderBottomColor: colors.border,
+    borderBottomWidth: 1,
+    borderTopColor: colors.border,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 18,
+    paddingVertical: 13,
+  },
+  signedInCopy: { flex: 1, paddingRight: 12 },
+  smallMuted: { color: colors.ivoryMuted, fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 4 },
   statGrid: { flexDirection: 'row', gap: 9, marginTop: 12 },
   statCard: {
     backgroundColor: colors.charcoalLift,
@@ -3547,6 +3962,8 @@ const styles = StyleSheet.create({
     minHeight: 46,
     paddingHorizontal: 12,
   },
+  textArea: { minHeight: 88, paddingTop: 12, textAlignVertical: 'top' },
+  halfField: { flex: 1, minWidth: 120 },
   optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
   optionButton: {
     backgroundColor: colors.charcoalLift,
